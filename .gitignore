@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.local
+server/data/
+*.db
+*.db-*
+.DS_Store
+.vercel
+*.tsbuildinfo
