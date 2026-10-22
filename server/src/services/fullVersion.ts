@@ -5,7 +5,7 @@ import { audius } from "../providers/audius.js";
 import { jamendo } from "../providers/jamendo.js";
 import { openverse } from "../providers/openverse.js";
 import { ytdlp } from "../providers/ytdlp.js";
-import type { Track } from "../types.js";
+import type { Source, Track } from "../types.js";
 import { isCensoredTitle, isConfirmedFull, MIN_FULL_SEC } from "./fullOnly.js";
 import { getTracks, upsertTracks } from "./tracks.js";
 
@@ -42,9 +42,21 @@ export function splitArtists(artist: string): string[] {
     .filter((a) => a.length > 1);
 }
 
+// Пометки другой версии записи. Оригинал не подменяем ремиксом, кавером, утечкой, концертной записью и т.п.
+const VARIANT_WORDS =
+  /(?<![\p{L}\p{N}])(remix|rmx|cover|live|leak|leaked|sped up|slowed|nightcore|instrumental|karaoke|acoustic|unplugged|mashup|bootleg|demo|extended|reprise|vip|8d|reverb|bass boosted|ремикс|кавер|лайв|слив|инструментал|караоке)(?![\p{L}\p{N}])/giu;
+
+/** Набор пометок версии в названии: «Song (Remix)» → {remix} */
+export function variantMarks(title: string): string {
+  return [...new Set((title.toLowerCase().match(VARIANT_WORDS) ?? []).map((w) => (w === "leaked" ? "leak" : w.replace(/\s+/g, " "))))]
+    .sort()
+    .join(",");
+}
+
 /** Подходит ли кандидат как полная версия трека-оригинала */
 export function scoreCandidate(target: Pick<Track, "title" | "artist" | "duration">, c: Pick<Track, "title" | "artist" | "duration" | "full" | "source">): number {
   if (!isConfirmedFull(c)) return 0; // превью и обрывки не считаем
+  if (variantMarks(target.title) !== variantMarks(c.title)) return 0; // другая версия записи — не та же песня
   const titleSim = Math.max(similarity(target.title, c.title), similarity(`${target.artist} ${target.title}`, c.title));
   if (titleSim < 0.6) return 0;
   // «A & B», «A feat. B» — достаточно совпадения с любым из артистов
@@ -91,18 +103,23 @@ function libraryCandidates(target: Track): Track[] {
 const safe = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
 
 /** firstQueryOnly — дорогой источник (процесс yt-dlp) спрашиваем один раз, а не на каждый вариант запроса */
-export type SearchProvider = ((query: string) => Promise<Track[]>) & { firstQueryOnly?: boolean };
+export type SearchProvider = ((query: string) => Promise<Track[]>) & { firstQueryOnly?: boolean; source?: Source };
+
+const provider = (source: Source, fn: (q: string) => Promise<Track[]>, extra: { firstQueryOnly?: boolean } = {}): SearchProvider =>
+  Object.assign(fn, { source, ...extra });
 
 export const defaultProviders: SearchProvider[] = [
-  (q) => audius.searchTracks(q, 15),
-  (q) => jamendo.searchTracks(q, 10),
-  (q) => archive.searchTracks(q, 10),
-  (q) => openverse.searchTracks(q, 10),
-  Object.assign((q: string) => ytdlp.searchTracks(q, 8), { firstQueryOnly: true }),
+  provider("audius", (q) => audius.searchTracks(q, 15)),
+  provider("jamendo", (q) => jamendo.searchTracks(q, 10)),
+  provider("archive", (q) => archive.searchTracks(q, 10)),
+  provider("openverse", (q) => openverse.searchTracks(q, 10)),
+  provider("ytdlp", (q) => ytdlp.searchTracks(q, 8), { firstQueryOnly: true }),
 ];
 
 interface FindOptions {
   streamUrlOf: (t: Track) => Promise<string | null>;
+  /** Не предлагать эти источники (например, YouTube, когда он не отдал звук) */
+  excludeSources?: Source[];
   providers?: SearchProvider[];
   probe?: (url: string) => Promise<boolean>;
   library?: (t: Track) => Track[];
@@ -118,10 +135,12 @@ type FindResult = { track: Track | null; checked: { source: string; title: strin
  * Источник, у которого только превью, просто не участвует — поиск идёт дальше.
  */
 export async function findFullVersion(target: Track, opts: FindOptions): Promise<FindResult> {
-  const hit = cache.get(target.id);
+  const exclude = new Set<Source>(opts.excludeSources ?? []);
+  const cacheKey = `${target.id}|${[...exclude].sort().join(",")}`;
+  const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_MS && !opts.providers) return hit.result;
 
-  const providers = opts.providers ?? defaultProviders;
+  const providers = (opts.providers ?? defaultProviders).filter((p) => !p.source || !exclude.has(p.source));
   const probe = opts.probe ?? probeAudio;
   // Несколько вариантов запроса: строгий поиск часто пуст, а по одному названию — шумный
   const primary = splitArtists(target.artist)[0] ?? target.artist;
@@ -132,7 +151,7 @@ export async function findFullVersion(target: Track, opts: FindOptions): Promise
   const remote = results.flat().filter((t) => !seen.has(t.id) && seen.add(t.id));
 
   const candidates = [...(opts.library ?? libraryCandidates)(target), ...remote]
-    .filter((c) => c.id !== target.id)
+    .filter((c) => c.id !== target.id && !exclude.has(c.source))
     .map((c) => ({ c, score: scoreCandidate(target, c) + (c.source === "library" ? 0.2 : 0) }))
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -150,6 +169,6 @@ export async function findFullVersion(target: Track, opts: FindOptions): Promise
   }
   if (found && !opts.providers) upsertTracks([found]);
   const result = { track: found, checked };
-  if (!opts.providers) cache.set(target.id, { at: Date.now(), result });
+  if (!opts.providers) cache.set(cacheKey, { at: Date.now(), result });
   return result;
 }

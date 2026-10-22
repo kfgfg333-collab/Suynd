@@ -49,6 +49,16 @@ export function dedupeFull(list: Track[]): Track[] {
   return list.filter((t) => keep.has(t.id));
 }
 
+/**
+ * Если для ролика YouTube есть та же запись в источнике с полным файлом и явными правами
+ * (Audius, Jamendo, Internet Archive, Openverse, ваши файлы) — оставляем её, а ролик убираем.
+ * Совпадение строгое: название, артист, длительность и одинаковые пометки версии (ремикс, утечка, live…).
+ */
+export function preferLicensed(list: Track[]): Track[] {
+  const licensed = list.filter((t) => t.source !== "ytdlp");
+  return list.filter((t) => t.source !== "ytdlp" || !licensed.some((o) => scoreCandidate(t, o) > 0));
+}
+
 /** Тот же артист на Audius (по точному имени) — у него есть полные треки */
 async function audiusTwin(name: string) {
   const list = await settled(audius.searchArtists(name, 5), []);
@@ -114,7 +124,7 @@ export async function catalogRoutes(app: FastifyInstance) {
       toResolve.map((c) => settled(withTimeout(findFullVersion(c, { streamUrlOf: fullStreamUrlOf }), 9000), { track: null, checked: [] })),
     );
     const found = resolved.map((r) => r.track).filter((t): t is Track => Boolean(t));
-    full = dedupeFull([...found, ...full]);
+    full = preferLicensed(dedupeFull([...found, ...full]));
     upsertTracks(full);
 
     const unavailable = dz.filter((c) => !full.some((f) => scoreCandidate(c, f) > 0));
