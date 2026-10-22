@@ -79,6 +79,7 @@ const { upsertTracks, getTracks, isValidTrackId } = await import("../src/service
 const { ytdlp, ytdlpTesting, classifyYtDlpError, mapVideo, parseVideoTitle, YtDlpError } = await import("../src/providers/ytdlp.js");
 const { isConfirmedFull } = await import("../src/services/fullOnly.js");
 const { findFullVersion } = await import("../src/services/fullVersion.js");
+const { dedupeFull } = await import("../src/routes/catalog.js");
 type Track = import("../src/types.js").Track;
 
 ytdlpTesting.allowMediaUrl((u) => u.protocol === "http:" && u.hostname === "127.0.0.1");
@@ -313,4 +314,16 @@ test("разбор ошибок и названий", () => {
   assert.equal(mapVideo({ id: "abcdefghijk", title: "Song #shorts", duration: 50 }), null);
   assert.equal(mapVideo({ id: "abcdefghijk", title: "Song", duration: 44 }), null);
   assert.ok(mapVideo({ id: "abcdefghijk", title: "Song", duration: 180 }));
+  assert.equal(mapVideo({ id: "abcdefghijk", title: "Song [1 HOUR]", duration: 3750 }), null, "зацикленная версия — не трек");
+  assert.equal(mapVideo({ id: "abcdefghijk", title: "Song", duration: 36_000 }), null);
+  assert.deepEqual(parseVideoTitle("Kevin MacLeod: Monkeys", "Kevin MacLeod Archive"), { artist: "Kevin MacLeod", title: "Monkeys" });
+  assert.deepEqual(parseVideoTitle("Part 1: Intro", "Some Channel"), { artist: "Some Channel", title: "Part 1: Intro" });
+  assert.deepEqual(parseVideoTitle("Monkeys - Kevin MacLeod (No Copyright Music)", "Kevin MacLeod"), { artist: "Kevin MacLeod", title: "Monkeys" });
+});
+
+test("одна запись из Internet Archive и YouTube показывается один раз (видео на пару секунд длиннее)", () => {
+  const ia: Track = { ...ytTrack("x"), id: "ia:QUJDRC9maWxl", source: "archive", artist: "Kevin MacLeod", title: "Monkeys Spinning Monkeys", duration: 125, downloadable: true };
+  const yt: Track = { ...ytTrack("LrM_Y39Gmhk"), artist: "Kevin MacLeod", title: "Monkeys Spinning Monkeys", duration: 131 };
+  const ytCover: Track = { ...ytTrack("coverVer001"), artist: "Kevin MacLeod", title: "Monkeys Spinning Monkeys", duration: 240 };
+  assert.deepEqual(dedupeFull([yt, ia, ytCover]).map((t) => t.id), ["ia:QUJDRC9maWxl", "yt:coverVer001"]);
 });

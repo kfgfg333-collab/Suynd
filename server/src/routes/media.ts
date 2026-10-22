@@ -65,7 +65,13 @@ async function openYoutube(req: FastifyRequest, raw: string): Promise<{ upstream
   if (!upstream.ok && upstream.status !== 206) {
     await upstream.body?.cancel();
     ytdlp.invalidate(raw);
-    throw new UpstreamError(`YouTube не отдал аудио (HTTP ${upstream.status}). Попробуйте ещё раз`, 502, "ytdlp_upstream");
+    throw new UpstreamError(
+      upstream.status === 403
+        ? "YouTube отказал серверу в доступе к аудио (HTTP 403). Так YouTube часто ограничивает серверы в дата-центрах; проверьте, что yt-dlp свежий и установлен с yt-dlp-ejs"
+        : `YouTube не отдал аудио (HTTP ${upstream.status}). Попробуйте ещё раз`,
+      502,
+      "ytdlp_upstream",
+    );
   }
   // Лицензия становится известна только при полном извлечении — запоминаем, что ролик можно скачать
   if (audio.creativeCommons) markDownloadable(`yt:${raw}`);

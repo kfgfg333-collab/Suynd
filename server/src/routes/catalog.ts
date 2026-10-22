@@ -30,18 +30,22 @@ const withTimeout = <T>(p: Promise<T>, ms: number) =>
 
 /** Один и тот же трек из разных источников — оставляем лучшую полную версию */
 const SOURCE_RANK: Record<string, number> = { library: 0, audius: 1, jamendo: 2, openverse: 3, archive: 4, ytdlp: 5 };
+// Видео часто длиннее записи на несколько секунд (заставка, тишина в конце)
+const sameLength = (a: number, b: number) => Math.abs(a - b) <= Math.max(8, Math.min(a, b) * 0.05);
 export function dedupeFull(list: Track[]): Track[] {
-  const best = new Map<string, Track>();
+  const best: Track[] = [];
   for (const t of onlyFull(list)) {
-    const key = `${normalize(t.artist)}|${normalize(t.title)}|${Math.round(t.duration / 5)}`;
-    const prev = best.get(key);
+    const key = `${normalize(t.artist)}|${normalize(t.title)}`;
+    const i = best.findIndex((b) => `${normalize(b.artist)}|${normalize(b.title)}` === key && sameLength(b.duration, t.duration));
+    const prev = i >= 0 ? best[i] : null;
     const better =
       !prev ||
       (isCensoredTitle(prev.title) && !isCensoredTitle(t.title)) ||
       (isCensoredTitle(prev.title) === isCensoredTitle(t.title) && (SOURCE_RANK[t.source] ?? 9) < (SOURCE_RANK[prev.source] ?? 9));
-    if (better) best.set(key, t);
+    if (!prev) best.push(t);
+    else if (better) best[i] = t;
   }
-  const keep = new Set([...best.values()].map((t) => t.id));
+  const keep = new Set(best.map((t) => t.id));
   return list.filter((t) => keep.has(t.id));
 }
 

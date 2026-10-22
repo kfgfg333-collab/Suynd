@@ -13,6 +13,7 @@ process.env.BOT_DISABLED = "true";
 const { buildApp } = await import("../src/app.js");
 const { issueSession } = await import("../src/auth.js");
 const { parseBuffer } = await import("music-metadata");
+const { FULL_SOURCES } = await import("../src/services/fullOnly.js");
 type Track = import("../src/types.js").Track;
 
 const app = await buildApp();
@@ -23,7 +24,7 @@ test("поиск возвращает только подтверждённые 
   const items = res.json().items as Track[];
   assert.ok(items.length > 0);
   for (const t of items) {
-    assert.ok(["audius", "archive", "jamendo", "library"].includes(t.source), `${t.id} из ${t.source}`);
+    assert.ok(FULL_SOURCES.has(t.source), `${t.id} из ${t.source}`);
     assert.ok(t.full && t.duration >= 45, `${t.id}: ${t.duration} с`);
   }
 });

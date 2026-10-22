@@ -29,6 +29,9 @@ const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const AUDIO_FORMAT = "ba[ext=m4a][protocol=https]/ba[protocol=https]/b[protocol=https]";
 // Ролики, которые сами себя называют фрагментом, — не полные песни
 const NOT_FULL_TITLE = /(^|[\s([#])(preview|snippet|teaser|trailer|shorts?)\b/i;
+// «10 hours», «1 час» — зацикленные версии, а не запись трека
+const LOOP_TITLE = /\b\d+\s*(hours?|hrs?|час(а|ов)?)\b/i;
+const MAX_SEC = 3 * 60 * 60;
 
 export type YtDlpErrorCode =
   | "not_installed"
@@ -250,12 +253,22 @@ export function parseVideoTitle(rawTitle: string, uploader: string): { artist: s
   const clean = (s: string) =>
     s
       .replace(/[([](official\s*)?(music\s*)?(video|audio|lyric(s)?(\s*video)?|visuali[sz]er|hd|hq|4k|mv|clip)[)\]]/gi, " ")
+      .replace(/[([](no\s+copyright(\s+music)?|copyright\s+free|royalty\s+free)[)\]]/gi, " ")
       .replace(/\s+/g, " ")
       .trim();
   const channel = uploader.replace(/\s*-\s*topic$/i, "").replace(/vevo$/i, "").replace(/\s+official$/i, "").trim();
   const title = clean(rawTitle);
   const m = title.match(/^(.{1,80}?)\s+[-–—]\s+(.+)$/);
-  if (m) return { artist: m[1].trim(), title: m[2].trim() };
+  if (m) {
+    const [left, right] = [m[1].trim(), m[2].trim()];
+    // «Song - Artist» на канале артиста: справа имя канала — меняем местами
+    const ch = channel.toLowerCase();
+    if (ch && right.toLowerCase() === ch && left.toLowerCase() !== ch) return { artist: right, title: left };
+    return { artist: left, title: right };
+  }
+  // «Kevin MacLeod: Song» на канале «Kevin MacLeod Archive» — слева имя артиста
+  const c = title.match(/^(.{2,60}?):\s+(.+)$/);
+  if (c && channel.toLowerCase().includes(c[1].trim().toLowerCase())) return { artist: c[1].trim(), title: c[2].trim() };
   return { artist: channel || "YouTube", title: title || rawTitle.trim() };
 }
 
@@ -267,9 +280,9 @@ export function mapVideo(v: FlatVideo): Track | null {
   if (v.is_live || (v.live_status && v.live_status !== "not_live" && v.live_status !== "was_live")) return null;
   if (v.availability && v.availability !== "public" && v.availability !== "unlisted") return null;
   const duration = Math.floor(Number(v.duration) || 0);
-  if (duration < MIN_SEC) return null;
+  if (duration < MIN_SEC || duration > MAX_SEC) return null;
   const rawTitle = (v.title ?? "").trim();
-  if (!rawTitle || NOT_FULL_TITLE.test(rawTitle)) return null;
+  if (!rawTitle || NOT_FULL_TITLE.test(rawTitle) || LOOP_TITLE.test(rawTitle)) return null;
   const { artist, title } = parseVideoTitle(rawTitle, (v.uploader ?? v.channel ?? "").trim());
   return {
     id: `yt:${v.id}`,
