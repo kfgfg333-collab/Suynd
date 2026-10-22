@@ -18,7 +18,7 @@ process.env.BOT_DISABLED = "true";
 process.env.WEB_SEARCH_BLOCKED_DOMAINS = "blocked.example";
 
 const web = await import("../src/services/web.js");
-const { parseYandexXml, parseRobots, robotsAllows, parsePage, scoreHit, checkPage, createWebSearch, configureWebSearch, targetFromQuery } = web;
+const { parseYandexXml, parseRobots, robotsAllows, parsePage, scoreHit, checkPage, createWebSearch, configureWebSearch, targetFromQuery, cleanHitTitle } = web;
 const { buildApp } = await import("../src/app.js");
 const { issueSession } = await import("../src/auth.js");
 type Track = import("../src/types.js").Track;
@@ -208,6 +208,47 @@ test("агрегатор: нет точного совпадения — пус�
   });
   const r = await s.search("Scally Milano Скам");
   assert.equal(r.best, null);
+});
+
+test("запрос с ошибкой («скали милано скам»): эталон уточняется по заголовкам выдачи, чужая песня — нет", async () => {
+  const catalogCalls: string[] = [];
+  const s = createWebSearch({
+    backends: [backend("fake", () => [hit(`${base}/track`, "Scally Milano - Скам (Onion 2021) слушать онлайн | Site"), hit(`${base}/other-song`, "Scam — Scally Milano, Tatarin")])],
+    catalog: async (q) => (catalogCalls.push(q), /scally milano - скам/i.test(q) ? [skamRef] : []),
+    checkPage,
+    takeQuota: () => true,
+  });
+  const r = await s.search("скали милано скам");
+  assert.equal(r.target?.artist, "Scally Milano");
+  assert.equal(r.target?.duration, 153);
+  assert.equal(r.best?.url, `${base}/track`);
+  assert.ok(catalogCalls.includes("Scally Milano - Скам"), JSON.stringify(catalogCalls));
+  // Эталон из выдачи, которого нет в запросе, не принимается
+  const s2 = createWebSearch({
+    backends: [backend("fake", () => [hit(`${base}/track`, "Scally Milano - Скам")])],
+    catalog: async (q) => (/скам/i.test(q) ? [skamRef] : []),
+    checkPage,
+    takeQuota: () => true,
+  });
+  assert.equal((await s2.search("милано другая песня")).target?.title, "милано другая песня");
+  // Заголовок «Скам» без исполнителя: в каталоге первым — чужой «Скам»; исполнителя нет в запросе — не принимается
+  const krystal: Track = { ...skamRef, id: "dz:9", artist: "LIL KRYSTALLL", duration: 120 };
+  const s3 = createWebSearch({
+    backends: [backend("fake", () => [hit(`${base}/track`, "Скам")])],
+    catalog: async () => [krystal],
+    checkPage,
+    takeQuota: () => true,
+  });
+  assert.equal((await s3.search("скали милано скам")).target?.artist, "", "чужой исполнитель не подставлен");
+});
+
+test("видео и клипы — не прослушивание; очистка заголовков выдачи", () => {
+  assert.equal(scoreHit(target, hit("https://news.example/videos/scally-milano-skam", "Scally Milano — Скам"), null), 0);
+  assert.equal(scoreHit(target, hit("https://x.example/a", "Scally Milano — Скам (клип)"), null), 0);
+  assert.equal(cleanHitTitle("Scally Milano - Скам (Onion 2021) слушать онлайн и скачать mp3 | Hitmos"), "Scally Milano - Скам");
+  assert.equal(cleanHitTitle("Scally Milano - Скам (Official Music Video)"), "Scally Milano - Скам");
+  assert.equal(cleanHitTitle("Скам - song and lyrics by Scally Milano | Spotify"), "Скам - Scally Milano");
+  assert.equal(cleanHitTitle("Скали Милано и Скам"), "Скали Милано Скам");
 });
 
 test("бюджет: месячный лимит останавливает запросы к API и объясняет почему", async () => {

@@ -84,7 +84,7 @@ export interface WebSearchResult {
 }
 
 const BACKEND_TIMEOUT_MS = 2500;
-const PAGE_TIMEOUT_MS = 2500;
+const PAGE_TIMEOUT_MS = 2000;
 const ROBOTS_TIMEOUT_MS = 1500;
 const MAX_PAGE_BYTES = 600 * 1024;
 const MAX_PAGE_CHECKS = 6;
@@ -397,7 +397,9 @@ const OFFICIAL: [RegExp, string][] = [
 // YouTube исключён из Suynd полностью; справочные сайты не дают послушать трек
 const EXCLUDED = /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com|wikipedia\.org|wikiwand\.com|genius\.com|musixmatch\.com|discogs\.com|last\.fm|lastfm\.ru|albumoftheyear\.org|rateyourmusic\.com|afisha\.yandex\.ru|kinoafisha\.info)$/;
 // Это не прослушивание трека, а текст, обзор или реакция
-const NOT_LISTENING = /(текст песни|текст и перевод|lyrics|аккорды|chords|реакция|reaction|обзор|review|интервью|interview|разбор|tutorial|туториал)/i;
+const NOT_LISTENING = /(текст песни|текст и перевод|lyrics|аккорды|chords|реакция|reaction|обзор|review|интервью|interview|разбор|tutorial|туториал|клип|видео|video|official video)/i;
+// Видеоразделы сайтов — это клип, а не прослушивание трека
+const VIDEO_PATH = /\/(videos?|clips?|klipy?)(\/|$)/i;
 
 const domainOf = (u: string) => {
   try {
@@ -437,6 +439,11 @@ export function scoreHit(target: Target, hit: SearchHit, page: PageInfo | null):
   const titleText = [page?.title, hit.title].filter(Boolean).join(" ");
   const allText = [titleText, page?.description, hit.snippet].filter(Boolean).join(" ");
   if (NOT_LISTENING.test(page?.title ?? hit.title)) return 0;
+  try {
+    if (VIDEO_PATH.test(new URL(page?.finalUrl ?? hit.url).pathname)) return 0;
+  } catch {
+    return 0;
+  }
   // Другая версия записи (ремикс, кавер, live, sped up, утечка…) — не та песня
   if (variantMarks(page?.title ?? hit.title) !== variantMarks(target.title)) return 0;
   const titleCov = coverage(target.title, titleText);
@@ -456,6 +463,19 @@ export function scoreHit(target: Target, hit: SearchHit, page: PageInfo | null):
   if (page?.status === "ok") score += 0.4;
   if (page?.songPage || page?.audioTag) score += 0.1;
   return score;
+}
+
+const targetOf = (t: Track): Target => ({ title: t.title, artist: t.artist, duration: t.duration || null, cover: t.cover });
+
+/** Заголовок страницы без названия сайта и слов «слушать онлайн», «скачать mp3» */
+export function cleanHitTitle(title: string): string {
+  return title
+    .split(/\s+[|·]\s+/)[0]
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
+    .replace(/song and lyrics by|official music video|official video|lyrics|текст песни/gi, " ")
+    .replace(/(?<![\p{L}\p{N}])(слушать|скачать|онлайн|бесплатно|в хорошем качестве|mp3|и|listen|online|free|download)(?![\p{L}\p{N}])/giu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function toResult(target: Target, hit: SearchHit, page: PageInfo | null): WebResult {
@@ -561,6 +581,24 @@ export function createWebSearch(deps: WebDeps) {
       .sort((a, b) => b.score - a.score);
   }
 
+  /** Эталон по заголовкам выдачи: «Scally Milano - Скам (Onion 2021) слушать онлайн» → каталог → «Scally Milano — Скам» */
+  async function refFromHits(query: string, hits: SearchHit[]): Promise<Track | null> {
+    const titles = [...new Set(hits.slice(0, 6).map((h) => cleanHitTitle(h.title)).filter((t) => t.length > 2))].slice(0, 3);
+    const lists = await Promise.all(titles.map((t) => deps.catalog(t).catch(() => [] as Track[])));
+    for (const [i, list] of lists.entries()) {
+      // Название эталона — и в запросе пользователя, и в заголовке; хотя бы одно слово исполнителя — в запросе.
+      // Иначе «Скам» из выдачи превратился бы в чужую песню с тем же названием
+      const ref = list.find(
+        (c) =>
+          coverage(c.title, query) >= 0.75 &&
+          coverage(c.title, titles[i]) >= 0.75 &&
+          [c.artist, ...splitArtists(c.artist)].some((a) => coverage(a, query) > 0),
+      );
+      if (ref) return ref;
+    }
+    return null;
+  }
+
   async function search(raw: string): Promise<WebSearchResult> {
     const query = sanitizeQuery(raw);
     const backends = deps.backends.filter((b) => b.enabled()).map((b) => b.name);
@@ -587,13 +625,19 @@ export function createWebSearch(deps: WebDeps) {
     const job = (async () => {
       const started = Date.now();
       const ref = pickReference(query, await deps.catalog(query).catch(() => []));
-      const target: Target = ref ? { title: ref.title, artist: ref.artist, duration: ref.duration || null, cover: ref.cover } : targetFromQuery(query);
-      const base = target.artist ? `${target.artist} ${target.title}` : target.title;
+      let target: Target = ref ? targetOf(ref) : targetFromQuery(query);
+      let base = target.artist ? `${target.artist} ${target.title}` : target.title;
       const state = { partial: false, notice: null as string | null, count: 0 };
       const pages = new Map<string, PageInfo>();
 
       // Этап 1: точное название и «слушать онлайн»
       let hits = await runQueries([base, `${base} слушать онлайн`], state);
+      // Запрос с ошибкой или транслитом («скали милано скам»): эталон уточняем по заголовкам выдачи
+      const refined = ref ? null : await refFromHits(query, hits);
+      if (refined) {
+        target = targetOf(refined);
+        base = `${target.artist} ${target.title}`;
+      }
       let ranked = await rank(target, hits, pages);
       // Этап 2 — только если открывающейся подходящей страницы нет
       if (!ranked.some((r) => r.page.status === "ok")) {
