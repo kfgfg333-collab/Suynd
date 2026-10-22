@@ -19,8 +19,8 @@ export function getBot(): Bot {
 
 const webAppAvailable = () => env.webappUrl.startsWith("https://");
 
-function openButton(text = "🎧 Открыть плеер", hash = "") {
-  return webAppAvailable() ? new InlineKeyboard().webApp(text, `${env.webappUrl}/${hash}`) : undefined;
+function openButton(text = "🎧 Открыть плеер", path = "") {
+  return webAppAvailable() ? new InlineKeyboard().webApp(text, `${env.webappUrl}${path}`) : undefined;
 }
 
 const AUDIO_EXT = /\.(mp3|m4a|aac|ogg|oga|opus|flac|wav)$/i;
@@ -130,7 +130,7 @@ export function escapeHtml(s: string) {
 
 export const notifyRelease: Notifier = async (r) => {
   const caption = `🆕 <b>${escapeHtml(r.artistName)}</b>\n${escapeHtml(r.kind)}: ${escapeHtml(r.title)}`;
-  const markup = openButton("▶️ Слушать", r.albumId ? `#/album/${r.albumId}` : "#/collection/releases");
+  const markup = openButton("▶️ Слушать", r.albumId ? `/album/${encodeURIComponent(r.albumId)}` : "/collection/releases");
   if (r.cover) await getBot().api.sendPhoto(env.allowedUserId, r.cover, { caption, parse_mode: "HTML", reply_markup: markup });
   else await getBot().api.sendMessage(env.allowedUserId, caption, { parse_mode: "HTML", reply_markup: markup });
 };
@@ -195,6 +195,7 @@ export async function sendTrackToChat(opts: { fileId?: string; stream?: AsyncIte
     title: opts.title,
     performer: opts.performer,
     duration: opts.duration,
-    thumbnail: opts.cover && opts.cover.startsWith("http") && !opts.fileId ? new InputFile(new URL(opts.cover)) : undefined,
+    // Telegram принимает миниатюры только до 200 КБ — берём маленькую версию обложки Audius
+    thumbnail: opts.cover?.startsWith("http") && !opts.fileId ? new InputFile(new URL(opts.cover.replace("1000x1000", "150x150"))) : undefined,
   });
 }
