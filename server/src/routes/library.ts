@@ -4,6 +4,9 @@ import fs from "node:fs";
 import { db, schema } from "../db/index.js";
 import { UpstreamError } from "../http.js";
 import { deezer, deezerGenreToAudius } from "../providers/deezer.js";
+import { importAudioBuffer } from "../bot.js";
+import { fetchAudioFromUrl, IMPORT_LIMIT, looksLikeAudio, verifyAudio } from "../services/importAudio.js";
+import { isPrivateHost } from "./media.js";
 import { getTracks, isValidTrackId, resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
 import type { Track } from "../types.js";
 
@@ -15,7 +18,11 @@ const MIN_PLAY_GAP_MS = 60 * 1000;
 export async function ensureTrack(body: unknown, id?: string): Promise<Track> {
   const t = (body as { track?: Track } | undefined)?.track;
   if (t && isValidTrackId(t.id) && (!id || t.id === id) && typeof t.title === "string" && typeof t.artist === "string") {
-    if (!t.id.startsWith("lib:")) upsertTracks([{ ...t, full: t.source === "audius", downloadable: t.source === "audius" && t.downloadable }]);
+    // Флаги «полный»/«скачиваемый» сервер определяет сам, по источнику, а не верит клиенту
+    const fullSources = ["audius", "archive", "jamendo"];
+    if (!t.id.startsWith("lib:")) {
+      upsertTracks([{ ...t, full: fullSources.includes(t.source), downloadable: fullSources.includes(t.source) && Boolean(t.downloadable) }]);
+    }
     const [stored] = getTracks([t.id]);
     if (stored) return stored;
   }
@@ -201,6 +208,31 @@ export async function libraryRoutes(app: FastifyInstance) {
   app.get("/api/library", async () => {
     const rows = db.select().from(schema.libraryFiles).orderBy(desc(schema.libraryFiles.createdAt)).all();
     return { items: getTracks(rows.map((r) => `lib:${r.id}`)) };
+  });
+
+  /* Импорт: файл с телефона (тело запроса = сам файл) */
+  app.addContentTypeParser(["application/octet-stream", "audio/*"], { parseAs: "buffer", bodyLimit: IMPORT_LIMIT + 1024 }, (_req, body, done) =>
+    done(null, body),
+  );
+
+  app.post("/api/library/upload", async (req) => {
+    const buffer = req.body as Buffer;
+    if (!Buffer.isBuffer(buffer)) throw new UpstreamError("Пришлите файл", 400);
+    const fileName = decodeURIComponent(String(req.headers["x-file-name"] ?? "track.mp3")).slice(0, 200);
+    const mime = String(req.headers["x-file-type"] ?? req.headers["content-type"] ?? "");
+    if (!looksLikeAudio(fileName, mime)) throw new UpstreamError("Это не аудиофайл", 415);
+    const check = await verifyAudio(buffer, mime.startsWith("audio/") ? mime : undefined);
+    const { track, existed } = await importAudioBuffer(buffer, fileName, mime);
+    return { track, existed, check };
+  });
+
+  /* Импорт по прямой ссылке на аудиофайл */
+  app.post("/api/library/import-url", async (req) => {
+    const url = String((req.body as { url?: string })?.url ?? "").trim();
+    const file = await fetchAudioFromUrl(url, isPrivateHost);
+    const check = await verifyAudio(file.buffer, file.mime.startsWith("audio/") ? file.mime : undefined);
+    const { track, existed } = await importAudioBuffer(file.buffer, file.fileName, file.mime);
+    return { track, existed, check };
   });
 
   app.delete("/api/library/:id", async (req) => {

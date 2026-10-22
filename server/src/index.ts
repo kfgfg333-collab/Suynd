@@ -17,6 +17,7 @@ const app = Fastify({
   logger: { level: env.isProd ? "info" : "warn" },
   trustProxy: true,
   bodyLimit: 1024 * 1024,
+  maxParamLength: 512, // id треков Internet Archive длинные (base64 от «item/файл»)
 });
 
 await app.register(cors, {

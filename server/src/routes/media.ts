@@ -7,7 +7,10 @@ import { db, schema } from "../db/index.js";
 import { UpstreamError } from "../http.js";
 import { audius, isAudiusDownloadable } from "../providers/audius.js";
 import { deezer } from "../providers/deezer.js";
+import { archive } from "../providers/archive.js";
 import { itunes } from "../providers/itunes.js";
+import { jamendo } from "../providers/jamendo.js";
+import { findFullVersion } from "../services/fullVersion.js";
 import { getTracks, resolveTrack, splitId } from "../services/tracks.js";
 import { TG_DOWNLOAD_LIMIT, telegramFileUrl } from "../telegramFiles.js";
 
@@ -34,33 +37,70 @@ async function proxyAudio(req: FastifyRequest, reply: FastifyReply, url: string,
   return reply.send(Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream));
 }
 
+/** Не даём ходить через /api/img во внутреннюю сеть сервера */
+export function isPrivateHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal") || h === "::1") return true;
+  const m = h.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
 function safeFileName(s: string) {
   return s.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "track";
 }
 
+/** Прямая ссылка на полный файл, только если источник разрешает скачивание */
+async function downloadableUrl(prefix: string, raw: string): Promise<string> {
+  if (prefix === "au") {
+    if (!isAudiusDownloadable(await audius.rawTrack(raw))) throw new UpstreamError("Автор не разрешил скачивание этого трека", 403);
+    // mp3-поток: компактный и точно играет в браузере
+    return audius.streamUrl(raw);
+  }
+  if (prefix === "jm") {
+    const t = await jamendo.raw(raw);
+    if (!t?.audiodownload_allowed || !t.audiodownload) throw new UpstreamError("Автор не разрешил скачивание этого трека", 403);
+    return t.audiodownload;
+  }
+  if (prefix === "ia") {
+    // Только CC / public domain — лицензия разрешает копирование
+    const track = await archive.track(raw);
+    const url = archive.fileUrl(raw);
+    if (!track || !url) throw new UpstreamError("Файл не найден в Internet Archive", 404);
+    return url;
+  }
+  throw new UpstreamError("Скачивание недоступно для этого трека", 403);
+}
+
+/** Ссылка, по которой сервер берёт аудио для плеера (клиент всегда ходит через наш сервер) */
+export async function streamSourceUrl(prefix: string, raw: string): Promise<string | null> {
+  if (prefix === "dz") return deezer.previewUrl(raw);
+  if (prefix === "it") return itunes.previewUrl(raw);
+  if (prefix === "au") return audius.streamUrl(raw);
+  if (prefix === "jm") return (await jamendo.raw(raw))?.audio ?? null;
+  if (prefix === "ia") return archive.fileUrl(raw);
+  return null;
+}
+
 export async function mediaRoutes(app: FastifyInstance) {
+  /*
+   * Всё аудио идёт через сервер: если у пользователя заблокирован домен источника
+   * (CDN Deezer, узлы Audius, archive.org), сервер за рубежом всё равно его получит.
+   */
   app.get("/api/stream/:id", async (req, reply) => {
     const [prefix, raw] = splitId((req.params as { id: string }).id);
-    if (prefix === "dz") {
-      const url = await deezer.previewUrl(raw);
-      if (!url) throw new UpstreamError("Превью недоступно", 404);
-      return reply.redirect(url, 302);
-    }
-    if (prefix === "it") {
-      const url = await itunes.previewUrl(raw);
-      if (!url) throw new UpstreamError("Превью недоступно", 404);
-      return reply.redirect(url, 302);
-    }
-    if (prefix === "au") return reply.redirect(audius.streamUrl(raw), 302);
     if (prefix === "lib") {
       const row = libraryRow(raw);
       if ((row.size ?? 0) > TG_DOWNLOAD_LIMIT) throw new UpstreamError("Файл больше 20 МБ — Telegram не позволяет его проигрывать", 413);
       return proxyAudio(req, reply, await telegramFileUrl(row.fileId), row.mime ? { "content-type": row.mime } : {});
     }
-    throw new UpstreamError("Неизвестный трек", 404);
+    const url = await streamSourceUrl(prefix, raw);
+    if (!url) throw new UpstreamError("Аудио недоступно", 404);
+    return proxyAudio(req, reply, url);
   });
 
-  /** Скачивание для офлайна — только мои файлы и Audius с разрешением автора */
+  /** Скачивание для офлайна — мои файлы и источники, где скачивание разрешено */
   app.get("/api/download/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const [prefix, raw] = splitId(id);
@@ -75,15 +115,8 @@ export async function mediaRoutes(app: FastifyInstance) {
         ...(row.mime ? { "content-type": row.mime } : {}),
       });
     }
-    if (prefix === "au") {
-      const t = await audius.rawTrack(raw);
-      if (!isAudiusDownloadable(t)) throw new UpstreamError("Автор не разрешил скачивание этого трека", 403);
-      // Для офлайна берём mp3-поток: он компактный и точно играет в браузере
-      return proxyAudio(req, reply, audius.streamUrl(raw), {
-        "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name + ".mp3")}`,
-      });
-    }
-    throw new UpstreamError("Скачивание недоступно для этого трека", 403);
+    const url = await downloadableUrl(prefix, raw);
+    return proxyAudio(req, reply, url, { "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name + ".mp3")}` });
   });
 
   /** Бот присылает файл в чат */
@@ -97,24 +130,53 @@ export async function mediaRoutes(app: FastifyInstance) {
       await sendTrackToChat({ fileId: row.fileId, filename: row.fileName ?? "track.mp3", title: track.title, performer: track.artist });
       return { ok: true };
     }
-    if (prefix === "au") {
-      const t = await audius.rawTrack(raw);
-      if (!isAudiusDownloadable(t)) throw new UpstreamError("Автор не разрешил скачивание этого трека", 403);
-      const res = await fetch(audius.streamUrl(raw), { signal: AbortSignal.timeout(120_000) });
-      if (!res.ok || !res.body) throw new UpstreamError("Audius не отдал файл", 502);
-      const size = Number(res.headers.get("content-length") ?? 0);
-      if (size > 50 * 1024 * 1024) throw new UpstreamError("Файл больше 50 МБ — Telegram не позволит боту его отправить", 413);
-      await sendTrackToChat({
-        stream: Readable.fromWeb(res.body as import("node:stream/web").ReadableStream),
-        filename: `${safeFileName(`${track.artist} - ${track.title}`)}.mp3`,
-        title: track.title,
-        performer: track.artist,
-        duration: track.duration,
-        cover: track.cover,
-      });
-      return { ok: true };
+    const url = await downloadableUrl(prefix, raw);
+    const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(120_000) });
+    if (!res.ok || !res.body) throw new UpstreamError("Источник не отдал файл", 502);
+    const size = Number(res.headers.get("content-length") ?? 0);
+    if (size > 50 * 1024 * 1024) {
+      await res.body.cancel();
+      throw new UpstreamError("Файл больше 50 МБ — Telegram не позволит боту его отправить", 413);
     }
-    throw new UpstreamError("Отправка недоступна для этого трека", 403);
+    await sendTrackToChat({
+      stream: Readable.fromWeb(res.body as import("node:stream/web").ReadableStream),
+      filename: `${safeFileName(`${track.artist} - ${track.title}`)}.mp3`,
+      title: track.title,
+      performer: track.artist,
+      duration: track.duration,
+      cover: track.cover,
+    });
+    return { ok: true };
+  });
+
+  /** Поиск полной версии трека (для превью Deezer/iTunes) в легальных полных источниках */
+  app.get("/api/tracks/:id/full", async (req) => {
+    const track = await resolveTrack((req.params as { id: string }).id);
+    if (!track) throw new UpstreamError("Трек не найден", 404);
+    if (track.full) return { track, checked: [] };
+    return findFullVersion(track, (c) => {
+      const [p, r] = splitId(c.id);
+      return streamSourceUrl(p, r);
+    });
+  });
+
+  /** Обложки через сервер — на случай, если CDN источника заблокирован у пользователя */
+  app.get("/api/img", async (req, reply) => {
+    const u = String((req.query as { u?: string }).u ?? "");
+    let url: URL;
+    try {
+      url = new URL(u);
+    } catch {
+      throw new UpstreamError("Некорректная ссылка", 400);
+    }
+    if (url.protocol !== "https:" || isPrivateHost(url.hostname)) throw new UpstreamError("Недопустимый адрес", 400);
+    const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(10_000) });
+    const type = res.headers.get("content-type") ?? "";
+    if (!res.ok || !type.startsWith("image/")) throw new UpstreamError("Картинка недоступна", 404);
+    const size = Number(res.headers.get("content-length") ?? 0);
+    if (size > 8 * 1024 * 1024) throw new UpstreamError("Слишком большая картинка", 413);
+    reply.header("content-type", type).header("cache-control", "private, max-age=604800");
+    return reply.send(Buffer.from(await res.arrayBuffer()));
   });
 
   app.get("/api/cover/lib/:id", async (req, reply) => {

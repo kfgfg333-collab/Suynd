@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { api, mediaUrl, streamUrl } from "../lib/api";
+import { api, enc, mediaUrl, SOURCE_LABELS, streamUrl } from "../lib/api";
 import { getOffline } from "../lib/offline";
 import { shuffleArray } from "../lib/format";
 import { haptic } from "../lib/telegram";
@@ -53,6 +53,7 @@ interface PlayerState {
   setFullOpen: (open: boolean) => void;
   waveFeedback: (value: 1 | -1) => Promise<void>;
   blockArtist: (t: Track) => Promise<void>;
+  findFull: (t: Track) => Promise<void>;
 }
 
 let uidSeq = 0;
@@ -445,6 +446,36 @@ export const usePlayer = create<PlayerState>((set, get) => ({
         set({ queue: get().queue.slice(0, get().index + 3) });
         ensureWaveAhead();
       }
+    }
+  },
+
+  /** Ищет полную версию превью в легальных полных источниках и подменяет её в очереди */
+  async findFull(track) {
+    toast("Ищу полную версию…");
+    try {
+      const r = await api<{ track: Track | null; checked: { source: string; title: string; ok: boolean }[] }>(`/api/tracks/${enc(track.id)}/full`);
+      if (!r.track) {
+        haptic.error();
+        toast(
+          r.checked.length
+            ? "Похожие записи нашлись, но ни одна не отдаёт аудио — пропускаю"
+            : "Полной версии в открытых источниках нет (Audius, Jamendo, Internet Archive, ваши файлы)",
+          "error",
+        );
+        return;
+      }
+      const found = r.track;
+      const { queue, index } = get();
+      if (queue[index]?.track.id === track.id) {
+        set({ queue: queue.map((q, i) => (i === index ? { ...q, track: found } : q)) });
+        void loadTrack(found, true);
+      } else {
+        get().playNext(found);
+      }
+      haptic.success();
+      toast(`Полная версия: ${SOURCE_LABELS[found.source]}`, "success");
+    } catch (e) {
+      toast((e as Error).message, "error");
     }
   },
 

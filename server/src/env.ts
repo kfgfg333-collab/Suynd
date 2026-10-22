@@ -25,6 +25,8 @@ export const env = {
   devAuthBypass: !isProd && process.env.DEV_AUTH_BYPASS === "true",
   // Отключить бота (например, для локальных тестов без интернета до Telegram)
   botDisabled: process.env.BOT_DISABLED === "true",
+  // Необязательно: бесплатный ключ Jamendo (https://devportal.jamendo.com) — ещё один источник полных треков
+  jamendoClientId: process.env.JAMENDO_CLIENT_ID?.trim() || "",
 };
 
 if (!Number.isFinite(env.allowedUserId) || env.allowedUserId <= 0) {

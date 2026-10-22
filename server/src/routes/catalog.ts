@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { audius } from "../providers/audius.js";
 import { deezer } from "../providers/deezer.js";
+import { archive } from "../providers/archive.js";
 import { itunes } from "../providers/itunes.js";
+import { jamendo } from "../providers/jamendo.js";
 import { resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
 import { UpstreamError } from "../http.js";
 import type { Track } from "../types.js";
@@ -18,6 +20,8 @@ function interleave<T>(a: T[], b: T[], bEvery = 3): T[] {
 }
 
 const settled = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
+const withTimeout = <T>(p: Promise<T>, ms: number) =>
+  Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))]);
 
 export async function catalogRoutes(app: FastifyInstance) {
   app.get("/api/search", async (req) => {
@@ -41,11 +45,15 @@ export async function catalogRoutes(app: FastifyInstance) {
     } catch {
       dzFailed = true;
     }
-    const [au, it] = await Promise.all([
+    // Полные треки: Audius, Jamendo (если задан ключ) и Internet Archive (CC / public domain)
+    const [au, jm, ia, it] = await Promise.all([
       settled(audius.searchTracks(query, 15), []),
+      settled(jamendo.searchTracks(query, 8), []),
+      settled(withTimeout(archive.searchTracks(query, 6), 6000), []),
       dzFailed ? settled(itunes.searchTracks(query), []) : Promise.resolve([]),
     ]);
-    const items = interleave(dzFailed ? it : dz, au, 3);
+    const full = interleave(au, interleave(jm, ia, 2), 3);
+    const items = interleave(dzFailed ? it : dz, full, 3);
     upsertTracks(items);
     return { items, fallback: dzFailed };
   });

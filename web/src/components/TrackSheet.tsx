@@ -10,13 +10,14 @@ import {
   ListStart,
   Mic2,
   Plus,
+  SearchCheck,
   Send,
   Sparkles,
   Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, enc } from "../lib/api";
+import { api, enc, SOURCE_LABELS } from "../lib/api";
 import { confirmDialog, haptic, openLink } from "../lib/telegram";
 import type { Playlist, Track } from "../lib/types";
 import { useLibrary } from "../store/library";
@@ -77,11 +78,15 @@ function MainActions({ track, ctx, onPlaylists }: { track: Track; ctx: { playlis
         <div className="min-w-0 flex-1">
           <div className="truncate font-bold">{track.title}</div>
           <div className="truncate text-sm text-muted">{track.artist}</div>
-          <SourceBadge track={track} className="mt-1" />
+          <div className="mt-1 flex items-center gap-1.5">
+            <SourceBadge track={track} />
+            <span className="text-[11px] text-muted">{SOURCE_LABELS[track.source]}</span>
+          </div>
         </div>
       </div>
       <div className="h-px bg-line" />
       <SheetItem icon={<Heart className={liked ? "fill-accent text-accent" : ""} />} label={liked ? "Убрать из любимых" : "В любимые"} onClick={run(() => lib.toggleLike(track))} />
+      {!track.full && <SheetItem icon={<SearchCheck />} label="Найти полную версию" hint="Audius, Jamendo, Archive" onClick={run(() => player.findFull(track))} />}
       <SheetItem icon={<ListStart />} label="Играть следующим" onClick={run(() => player.playNext(track))} />
       <SheetItem icon={<ListEnd />} label="Добавить в очередь" onClick={run(() => player.addToQueue(track))} />
       <SheetItem icon={<ListPlus />} label="Добавить в плейлист" onClick={onPlaylists} />
