@@ -18,6 +18,34 @@ export interface BestResult {
   partial: boolean;
 }
 
+/** Страница в интернете, где можно послушать трек (открывается в браузере, Suynd её звук не проигрывает) */
+export interface WebResult {
+  url: string;
+  domain: string;
+  site: string;
+  official: boolean;
+  title: string;
+  artist: string;
+  cover: string | null;
+  duration: number | null;
+  durationSource: "page" | "catalog" | null;
+  verified: "ok" | "blocked" | "robots" | "gone" | "error";
+  songPage: boolean;
+  audioTag: boolean;
+  note: string;
+}
+
+export interface WebSearchResult {
+  query: string;
+  configured: boolean;
+  target: { title: string; artist: string; duration: number | null; cover: string | null } | null;
+  best: WebResult | null;
+  others: WebResult[];
+  partial: boolean;
+  notice: string | null;
+  ms: number;
+}
+
 export interface Track {
   id: string;
   source: Source;

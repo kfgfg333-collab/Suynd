@@ -7,7 +7,7 @@ import { Button, Cover, EmptyState, ErrorState, Segmented, Skeleton, SourceBadge
 import { enc, SOURCE_LABELS } from "../lib/api";
 import { formatTime } from "../lib/format";
 import { openLink } from "../lib/telegram";
-import type { Album, Artist, BestResult } from "../lib/types";
+import type { Album, Artist, BestResult, Track, WebResult, WebSearchResult } from "../lib/types";
 import { useApi, useDebounced } from "../lib/useApi";
 import { useCurrentTrack, usePlayer } from "../store/player";
 import { useUi } from "../store/ui";
@@ -121,90 +121,39 @@ function Results({ q, tab }: { q: string; tab: Tab }) {
   return <CatalogResults q={q} tab={tab} />;
 }
 
-/** Один лучший проверенный результат; если его нет — честно говорим об этом и даём официальные ссылки */
+/**
+ * Один основной результат. Порядок: точное совпадение в источниках Suynd (играет здесь) →
+ * лучшая страница в интернете (открывается в браузере) → совпадение по словам запроса → честное «не найдено».
+ * Оба поиска идут параллельно: результат Suynd показывается сразу, веб-страницы догружаются.
+ */
 function TrackResults({ q }: { q: string }) {
-  const { data, error, loading, reload } = useApi<BestResult>(`/api/search?q=${enc(q)}&type=tracks`);
-  const playList = usePlayer((s) => s.playList);
-  const isPlaying = usePlayer((s) => s.isPlaying);
-  const current = useCurrentTrack();
-  const openSheet = useUi((s) => s.openSheet);
+  const own = useApi<BestResult>(`/api/search?q=${enc(q)}&type=tracks`);
+  const web = useApi<WebSearchResult>(`/api/search/web?q=${enc(q)}`);
   const [showMore, setShowMore] = useState(false);
   useEffect(() => setShowMore(false), [q]);
 
-  if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading || !data) return <BestSkeleton />;
+  const data = own.data;
+  const exact = data?.best && data.mode === "track" ? data.best : null;
+  const webDone = Boolean(web.data || web.error);
+  const webBest = web.data?.best ?? null;
 
-  const partialNote = data.partial && (
-    <div className="mx-4 mt-3 flex items-center justify-between gap-3 rounded-2xl bg-surface px-4 py-3 text-xs text-muted">
-      <span>Часть источников сейчас не ответила — результат может быть неполным.</span>
-      <button onClick={reload} className="shrink-0 font-bold text-white/80">
-        Повторить
-      </button>
-    </div>
-  );
+  if (own.error && web.error) return <ErrorState message={own.error} onRetry={() => (own.reload(), web.reload())} />;
+  // Ждём, пока станет ясно, что показывать главным: точный трек Suynd или страницу из интернета
+  if (!exact && (!webDone || (own.loading && !own.error))) return <BestSkeleton />;
 
-  if (!data.best) {
-    const c = data.catalog;
-    return (
-      <>
-        <EmptyState
-          icon={<SearchX className="h-7 w-7" />}
-          title="Полной версии нет в разрешённых источниках"
-          text={
-            c
-              ? `«${c.artist} — ${c.title}» есть в каталоге, но ни один из подключённых источников не даёт её целиком. Превью, ремиксы и чужие версии мы не подставляем.`
-              : `По запросу «${q}» подходящих полных треков не нашлось. Попробуйте написать иначе.`
-          }
-        />
-        {data.links && (
-          <div className="mx-4 space-y-2">
-            <div className="text-xs font-bold uppercase tracking-widest text-muted">Послушать в официальных сервисах</div>
-            {data.links.deezer && <LinkRow label="Deezer" url={data.links.deezer} />}
-            <LinkRow label="Spotify" url={data.links.spotify} />
-            <LinkRow label="Яндекс Музыка" url={data.links.yandex} />
-          </div>
-        )}
-        {partialNote}
-      </>
-    );
-  }
+  const webList = [webBest, ...(web.data?.others ?? [])].filter((w): w is WebResult => Boolean(w));
+  const main: "own" | "web" | "none" = exact ? "own" : webBest ? "web" : data?.best ? "own" : "none";
+  const ownTrack = exact ?? data?.best ?? null;
+  const restWeb = main === "web" ? webList.slice(1) : webList;
+  const partial = Boolean(data?.partial || web.data?.partial);
 
-  const best = data.best;
-  const active = current?.id === best.id;
   return (
     <div>
-      <div className="mx-4 rounded-3xl bg-surface p-4">
-        <div className="mb-3 text-xs font-bold uppercase tracking-widest text-muted">Лучший результат</div>
-        <div className="flex items-center gap-4">
-          <Cover src={best.cover} className="h-24 w-24" rounded="rounded-2xl" />
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-lg font-bold">{best.title}</div>
-            <div className="truncate text-sm text-muted">{best.artist}</div>
-            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted">
-              <SourceBadge track={best} />
-              <span className="truncate">
-                {SOURCE_LABELS[best.source]}
-                {best.duration ? ` · ${formatTime(best.duration)}` : ""}
-              </span>
-            </div>
-          </div>
-        </div>
-        <div className="mt-4 flex items-center gap-2">
-          <Button className="flex-1" onClick={() => playList([best], 0, `Поиск: ${q}`)}>
-            {active && isPlaying ? <Pause className="h-4 w-4 fill-black" /> : <Play className="h-4 w-4 fill-black" />}
-            {active && isPlaying ? "Пауза" : "Слушать"}
-          </Button>
-          <Button variant="secondary" onClick={() => openSheet(best, {})}>
-            <MoreHorizontal className="h-4 w-4" />
-          </Button>
-        </div>
-        {(best.alternates?.length ?? 0) > 0 && (
-          <div className="mt-3 text-[11px] text-muted">
-            Запасные источники этой записи: {[...new Set(best.alternates!.map((a) => SOURCE_LABELS[a.source]))].join(", ")} — включатся сами, если основной не ответит.
-          </div>
-        )}
-      </div>
-      {data.more.length > 0 && (
+      {main === "own" && ownTrack && <OwnCard track={ownTrack} q={q} />}
+      {main === "web" && webBest && <WebCard result={webBest} />}
+      {main === "none" && <NothingFound q={q} data={data} />}
+
+      {main === "own" && data && data.more.length > 0 && (
         <div className="mt-4">
           {showMore ? (
             <TrackList tracks={data.more} title={`Поиск: ${q}`} />
@@ -215,8 +164,144 @@ function TrackResults({ q }: { q: string }) {
           )}
         </div>
       )}
-      {partialNote}
+
+      {restWeb.length > 0 && (
+        <div className="mx-4 mt-5">
+          <div className="mb-2 text-xs font-bold uppercase tracking-widest text-muted">Где ещё послушать</div>
+          <div className="space-y-2">
+            {restWeb.map((w) => (
+              <WebRow key={w.url} result={w} />
+            ))}
+          </div>
+        </div>
+      )}
+      {!webDone && main === "own" && <div className="mx-4 mt-5 text-xs text-muted">Ищем, где ещё можно послушать…</div>}
+      {web.data?.notice && <div className="mx-4 mt-4 text-[11px] text-muted">{web.data.notice}</div>}
+      {partial && (
+        <div className="mx-4 mt-3 flex items-center justify-between gap-3 rounded-2xl bg-surface px-4 py-3 text-xs text-muted">
+          <span>Часть источников сейчас не ответила — результат может быть неполным.</span>
+          <button onClick={() => (own.reload(), web.reload())} className="shrink-0 font-bold text-white/80">
+            Повторить
+          </button>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** Трек из разрешённого источника — играет в плеере Suynd */
+function OwnCard({ track, q }: { track: Track; q: string }) {
+  const playList = usePlayer((s) => s.playList);
+  const isPlaying = usePlayer((s) => s.isPlaying);
+  const current = useCurrentTrack();
+  const openSheet = useUi((s) => s.openSheet);
+  const active = current?.id === track.id;
+  return (
+    <div className="mx-4 rounded-3xl bg-surface p-4">
+      <div className="mb-3 text-xs font-bold uppercase tracking-widest text-muted">Лучший результат · играет в Suynd</div>
+      <div className="flex items-center gap-4">
+        <Cover src={track.cover} className="h-24 w-24" rounded="rounded-2xl" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-lg font-bold">{track.title}</div>
+          <div className="truncate text-sm text-muted">{track.artist}</div>
+          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted">
+            <SourceBadge track={track} />
+            <span className="truncate">
+              {SOURCE_LABELS[track.source]}
+              {track.duration ? ` · ${formatTime(track.duration)}` : ""}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="mt-4 flex items-center gap-2">
+        <Button className="flex-1" onClick={() => playList([track], 0, `Поиск: ${q}`)}>
+          {active && isPlaying ? <Pause className="h-4 w-4 fill-black" /> : <Play className="h-4 w-4 fill-black" />}
+          {active && isPlaying ? "Пауза" : "Слушать"}
+        </Button>
+        <Button variant="secondary" onClick={() => openSheet(track, {})}>
+          <MoreHorizontal className="h-4 w-4" />
+        </Button>
+      </div>
+      {(track.alternates?.length ?? 0) > 0 && (
+        <div className="mt-3 text-[11px] text-muted">
+          Запасные источники этой записи: {[...new Set(track.alternates!.map((a) => SOURCE_LABELS[a.source]))].join(", ")} — включатся сами, если основной не ответит.
+        </div>
+      )}
+    </div>
+  );
+}
+
+const VERIFIED_LABEL: Record<WebResult["verified"], string> = {
+  ok: "страница проверена",
+  blocked: "сайт не пускает проверку",
+  robots: "проверка запрещена сайтом",
+  gone: "страница не найдена",
+  error: "страницу проверить не удалось",
+};
+
+/** Страница в интернете: открывается в браузере, это не плеер Suynd */
+function WebCard({ result }: { result: WebResult }) {
+  return (
+    <div className="mx-4 rounded-3xl bg-surface p-4">
+      <div className="mb-3 text-xs font-bold uppercase tracking-widest text-muted">Лучший результат · {result.official ? "официальный сервис" : "внешний сайт"}</div>
+      <div className="flex items-center gap-4">
+        <Cover src={result.cover} className="h-24 w-24" rounded="rounded-2xl" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-lg font-bold">{result.title}</div>
+          {result.artist && <div className="truncate text-sm text-muted">{result.artist}</div>}
+          <div className="mt-1.5 truncate text-[11px] text-muted">
+            {result.site}
+            {result.duration ? ` · ${formatTime(result.duration)}${result.durationSource === "catalog" ? " (по каталогу)" : ""}` : ""}
+          </div>
+        </div>
+      </div>
+      <Button className="mt-4 w-full" onClick={() => openLink(result.url)}>
+        <ExternalLink className="h-4 w-4" />
+        Открыть на {result.domain}
+      </Button>
+      <div className="mt-3 text-[11px] leading-snug text-muted">
+        {VERIFIED_LABEL[result.verified].charAt(0).toUpperCase() + VERIFIED_LABEL[result.verified].slice(1)}. {result.note}.
+      </div>
+    </div>
+  );
+}
+
+function WebRow({ result }: { result: WebResult }) {
+  return (
+    <button onClick={() => openLink(result.url)} className="flex w-full items-center gap-3 rounded-2xl bg-surface px-4 py-3 text-left active:bg-white/5">
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold">{result.site}</div>
+        <div className="truncate text-[11px] text-muted">
+          {result.official ? "официальный сервис" : "внешний сайт, права не проверены"} · {VERIFIED_LABEL[result.verified]}
+        </div>
+      </div>
+      <ExternalLink className="h-4 w-4 shrink-0 text-muted" />
+    </button>
+  );
+}
+
+function NothingFound({ q, data }: { q: string; data: BestResult | undefined }) {
+  const c = data?.catalog;
+  return (
+    <>
+      <EmptyState
+        icon={<SearchX className="h-7 w-7" />}
+        title="Полной версии не нашлось"
+        text={
+          c
+            ? `«${c.artist} — ${c.title}» есть в каталоге, но ни подключённые источники, ни веб-поиск не нашли, где её послушать целиком. Превью, ремиксы и чужие версии мы не подставляем.`
+            : `По запросу «${q}» подходящих треков не нашлось. Попробуйте написать иначе.`
+        }
+      />
+      {data?.links && (
+        <div className="mx-4 space-y-2">
+          <div className="text-xs font-bold uppercase tracking-widest text-muted">Поискать в официальных сервисах</div>
+          {data.links.deezer && <LinkRow label="Deezer" url={data.links.deezer} />}
+          <LinkRow label="Spotify" url={data.links.spotify} />
+          <LinkRow label="Яндекс Музыка" url={data.links.yandex} />
+        </div>
+      )}
+    </>
   );
 }
 
