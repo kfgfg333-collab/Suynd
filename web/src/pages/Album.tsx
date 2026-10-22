@@ -1,4 +1,5 @@
 import { Link, useParams } from "react-router-dom";
+import { CatalogList } from "../components/CatalogRow";
 import { PlayButtons } from "../components/ListHeader";
 import { TrackList } from "../components/TrackRow";
 import { Cover, EmptyState, ErrorState, Skeleton, TrackListSkeleton } from "../components/ui";
@@ -10,7 +11,7 @@ import { Disc3 } from "lucide-react";
 
 export default function AlbumPage() {
   const id = useParams().id!;
-  const { data, error, loading, reload } = useApi<{ album: Album; tracks: Track[] }>(`/api/albums/${encodeURIComponent(id)}`);
+  const { data, error, loading, reload } = useApi<{ album: Album; tracks: Track[]; catalog: Track[] }>(`/api/albums/${encodeURIComponent(id)}`);
 
   if (error) return <ErrorState message={error} onRetry={reload} />;
   if (loading || !data)
@@ -24,7 +25,7 @@ export default function AlbumPage() {
       </div>
     );
 
-  const { album, tracks } = data;
+  const { album, tracks, catalog = [] } = data;
   return (
     <div>
       <div className="relative overflow-hidden">
@@ -43,14 +44,20 @@ export default function AlbumPage() {
             <span className="mt-1 text-muted">{album.artist}</span>
           )}
           <p className="mt-1 text-xs text-muted">
-            {[album.type === "single" ? "Сингл" : album.type === "playlist" ? "Плейлист" : "Альбом", formatDate(album.releaseDate), tracksCount(tracks.length)].filter(Boolean).join(" · ")}
+            {[album.type === "single" ? "Сингл" : album.type === "playlist" ? "Плейлист" : "Альбом", formatDate(album.releaseDate), tracksCount(tracks.length + catalog.length)].filter(Boolean).join(" · ")}
           </p>
         </div>
       </div>
-      <PlayButtons tracks={tracks} title={album.title} />
-      {tracks.length ? (
-        <TrackList tracks={tracks} title={album.title} numbered={album.source === "deezer"} />
-      ) : (
+      {tracks.length > 0 && (
+        <>
+          <PlayButtons tracks={tracks} title={album.title} />
+          <TrackList tracks={tracks} title={album.title} />
+        </>
+      )}
+      <div className="pt-3">
+        <CatalogList tracks={catalog} numbered />
+      </div>
+      {!tracks.length && !catalog.length && (
         <EmptyState icon={<Disc3 className="h-7 w-7" />} title="Треки недоступны" text="Этот релиз нельзя прослушать в вашем регионе или он ещё не вышел." />
       )}
     </div>

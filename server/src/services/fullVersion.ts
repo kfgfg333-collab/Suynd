@@ -4,6 +4,7 @@ import { archive } from "../providers/archive.js";
 import { audius } from "../providers/audius.js";
 import { jamendo } from "../providers/jamendo.js";
 import type { Track } from "../types.js";
+import { isCensoredTitle, isConfirmedFull, MIN_FULL_SEC } from "./fullOnly.js";
 import { getTracks, upsertTracks } from "./tracks.js";
 
 /** Нормализация для сравнения: без регистра, скобок «(feat. …)», «- Remastered», знаков */
@@ -31,7 +32,6 @@ export function similarity(a: string, b: string): number {
   return common / Math.max(ta.size, tb.size);
 }
 
-const MIN_FULL_SEC = 60;
 
 export function splitArtists(artist: string): string[] {
   return artist
@@ -41,8 +41,8 @@ export function splitArtists(artist: string): string[] {
 }
 
 /** Подходит ли кандидат как полная версия трека-оригинала */
-export function scoreCandidate(target: Pick<Track, "title" | "artist" | "duration">, c: Pick<Track, "title" | "artist" | "duration" | "full">): number {
-  if (!c.full || c.duration < MIN_FULL_SEC) return 0; // превью и обрывки не считаем
+export function scoreCandidate(target: Pick<Track, "title" | "artist" | "duration">, c: Pick<Track, "title" | "artist" | "duration" | "full" | "source">): number {
+  if (!isConfirmedFull(c)) return 0; // превью и обрывки не считаем
   const titleSim = Math.max(similarity(target.title, c.title), similarity(`${target.artist} ${target.title}`, c.title));
   if (titleSim < 0.6) return 0;
   // «A & B», «A feat. B» — достаточно совпадения с любым из артистов
@@ -56,7 +56,10 @@ export function scoreCandidate(target: Pick<Track, "title" | "artist" | "duratio
     const diff = Math.abs(c.duration - target.duration);
     if (diff > Math.max(15, target.duration * 0.12)) return 0;
   }
-  return titleSim * 0.6 + artistSim * 0.4;
+  let score = titleSim * 0.6 + artistSim * 0.4;
+  // Цензурная версия (clean / radio edit) — только если оригинал сам цензурный
+  if (isCensoredTitle(c.title) && !isCensoredTitle(target.title)) score *= 0.6;
+  return score;
 }
 
 /** Реальная проверка: источник отдаёт аудио (запрос первых байт) */
@@ -85,35 +88,63 @@ function libraryCandidates(target: Track): Track[] {
 
 const safe = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
 
+export type SearchProvider = (query: string) => Promise<Track[]>;
+
+export const defaultProviders: SearchProvider[] = [
+  (q) => audius.searchTracks(q, 15),
+  (q) => jamendo.searchTracks(q, 10),
+  (q) => archive.searchTracks(q, 10),
+];
+
+interface FindOptions {
+  streamUrlOf: (t: Track) => Promise<string | null>;
+  providers?: SearchProvider[];
+  probe?: (url: string) => Promise<boolean>;
+  library?: (t: Track) => Track[];
+}
+
+const cache = new Map<string, { at: number; result: FindResult }>();
+const CACHE_MS = 6 * 60 * 60 * 1000;
+type FindResult = { track: Track | null; checked: { source: string; title: string; ok: boolean }[] };
+
 /**
- * Ищет полную версию трека в легальных источниках с полными файлами:
+ * Ищет полную версию трека во всех подключённых полных источниках:
  * ваша библиотека → Audius → Jamendo → Internet Archive (CC / public domain).
+ * Источник, у которого только превью, просто не участвует — поиск идёт дальше.
  */
-export async function findFullVersion(target: Track, streamUrlOf: (t: Track) => Promise<string | null>) {
+export async function findFullVersion(target: Track, opts: FindOptions): Promise<FindResult> {
+  const hit = cache.get(target.id);
+  if (hit && Date.now() - hit.at < CACHE_MS && !opts.providers) return hit.result;
+
+  const providers = opts.providers ?? defaultProviders;
+  const probe = opts.probe ?? probeAudio;
   // Несколько вариантов запроса: строгий поиск часто пуст, а по одному названию — шумный
   const primary = splitArtists(target.artist)[0] ?? target.artist;
   const title = normalize(target.title);
   const queries = [...new Set([`${primary} ${title}`, `${target.artist} ${target.title}`, title])].map((q) => q.slice(0, 100));
-  const results = await Promise.all(
-    queries.flatMap((q) => [safe(audius.searchTracks(q, 15), []), safe(jamendo.searchTracks(q, 10), []), safe(archive.searchTracks(q, 10), [])]),
-  );
+  const results = await Promise.all(queries.flatMap((q) => providers.map((p) => safe(p(q), []))));
   const seen = new Set<string>();
   const remote = results.flat().filter((t) => !seen.has(t.id) && seen.add(t.id));
-  const candidates = [...libraryCandidates(target), ...remote]
+
+  const candidates = [...(opts.library ?? libraryCandidates)(target), ...remote]
     .filter((c) => c.id !== target.id)
     .map((c) => ({ c, score: scoreCandidate(target, c) + (c.source === "library" ? 0.2 : 0) }))
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score);
 
-  const checked: { source: string; title: string; ok: boolean }[] = [];
+  const checked: FindResult["checked"] = [];
+  let found: Track | null = null;
   for (const { c } of candidates.slice(0, 4)) {
-    const url = c.source === "library" ? null : await streamUrlOf(c).catch(() => null);
-    const ok = c.source === "library" ? true : url ? await probeAudio(url) : false;
+    const url = c.source === "library" ? null : await opts.streamUrlOf(c).catch(() => null);
+    const ok = c.source === "library" ? true : url ? await probe(url) : false;
     checked.push({ source: c.source, title: `${c.artist} — ${c.title}`, ok });
     if (ok) {
-      upsertTracks([c]);
-      return { track: c, checked };
+      found = c;
+      break;
     }
   }
-  return { track: null, checked };
+  if (found && !opts.providers) upsertTracks([found]);
+  const result = { track: found, checked };
+  if (!opts.providers) cache.set(target.id, { at: Date.now(), result });
+  return result;
 }

@@ -10,7 +10,6 @@ import {
   ListStart,
   Mic2,
   Plus,
-  SearchCheck,
   Send,
   Sparkles,
   Trash2,
@@ -86,7 +85,6 @@ function MainActions({ track, ctx, onPlaylists }: { track: Track; ctx: { playlis
       </div>
       <div className="h-px bg-line" />
       <SheetItem icon={<Heart className={liked ? "fill-accent text-accent" : ""} />} label={liked ? "Убрать из любимых" : "В любимые"} onClick={run(() => lib.toggleLike(track))} />
-      {!track.full && <SheetItem icon={<SearchCheck />} label="Найти полную версию" hint="Audius, Jamendo, Archive" onClick={run(() => player.findFull(track))} />}
       <SheetItem icon={<ListStart />} label="Играть следующим" onClick={run(() => player.playNext(track))} />
       <SheetItem icon={<ListEnd />} label="Добавить в очередь" onClick={run(() => player.addToQueue(track))} />
       <SheetItem icon={<ListPlus />} label="Добавить в плейлист" onClick={onPlaylists} />

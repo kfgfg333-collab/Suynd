@@ -59,13 +59,11 @@ export function SourceBadge({ track, className = "" }: { track: Track; className
 }
 
 function SourceBadgeInner({ track, className = "" }: { track: Track; className?: string }) {
-  return track.full ? (
+  // В Suynd играют только полные треки, поэтому бейдж один
+  if (!track.full) return null;
+  return (
     <span className={`inline-flex shrink-0 items-center rounded-md bg-full/15 px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-full ${className}`}>
       полный
-    </span>
-  ) : (
-    <span className={`inline-flex shrink-0 items-center rounded-md bg-preview/15 px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-preview ${className}`}>
-      превью 30с
     </span>
   );
 }

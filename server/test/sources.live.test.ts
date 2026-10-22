@@ -14,11 +14,10 @@ const { jamendo } = await import("../src/providers/jamendo.js");
 const { probeAudio } = await import("../src/services/fullVersion.js");
 const { splitId } = await import("../src/services/tracks.js");
 
-test("Deezer: только превью, ссылка отдаёт аудио", async () => {
-  const [t] = await deezer.searchTracks("daft punk", 5);
-  assert.equal(t.full, false);
-  const url = await deezer.previewUrl(splitId(t.id)[1]);
-  assert.ok(url && (await probeAudio(url)), "превью не отдаётся");
+test("Deezer: только каталог — его треки никогда не помечены как полные", async () => {
+  const list = await deezer.searchTracks("daft punk", 5);
+  assert.ok(list.length > 0);
+  assert.ok(list.every((t) => t.full === false));
 });
 
 test("Audius: полный трек, поток отдаёт аудио, длительность > 60 с", async () => {

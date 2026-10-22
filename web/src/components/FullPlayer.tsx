@@ -14,7 +14,6 @@ import {
   Repeat,
   Repeat1,
   Send,
-  SearchCheck,
   Shuffle,
   SkipBack,
   SkipForward,
@@ -199,7 +198,7 @@ function Progress({ track }: { track: Track }) {
   const seek = usePlayer((s) => s.seek);
   const [dragging, setDragging] = useState<number | null>(null);
   const value = dragging ?? currentTime;
-  const max = duration || (track.full ? track.duration : 30);
+  const max = duration || track.duration;
   const pct = max ? (value / max) * 100 : 0;
   return (
     <div className="pt-4">
@@ -228,7 +227,7 @@ function Progress({ track }: { track: Track }) {
       />
       <div className="flex justify-between text-xs font-semibold text-white/60">
         <span>{formatTime(value)}</span>
-        <span>{track.full ? formatTime(max) : `${formatTime(max)} · превью`}</span>
+        <span>{formatTime(max)}</span>
       </div>
     </div>
   );
@@ -285,7 +284,7 @@ function BottomActions({ track, queueOpen, onQueue }: { track: Track; queueOpen:
   const progress = useLibrary((s) => s.downloading.get(track.id));
   const { download, removeDownload, sendToChat } = useLibrary.getState();
   const isWave = usePlayer((s) => s.context?.kind === "wave");
-  const { playList, blockArtist, findFull } = usePlayer.getState();
+  const { playList, blockArtist } = usePlayer.getState();
 
   const similar = async () => {
     toast("Ищу похожее…");
@@ -303,11 +302,6 @@ function BottomActions({ track, queueOpen, onQueue }: { track: Track; queueOpen:
       <IconButton label="Похожее" onClick={similar} className="h-11 w-11">
         <Sparkles className="h-5 w-5" />
       </IconButton>
-      {!track.full && (
-        <IconButton label="Найти полную версию" onClick={() => findFull(track)} className="h-11 w-11 text-preview">
-          <SearchCheck className="h-5 w-5" />
-        </IconButton>
-      )}
       {isWave && track.artistId && (
         <IconButton label="Не показывать артиста" onClick={() => blockArtist(track)} className="h-11 w-11">
           <Ban className="h-5 w-5" />

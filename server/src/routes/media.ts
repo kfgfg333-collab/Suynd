@@ -6,11 +6,11 @@ import { sendTrackToChat } from "../bot.js";
 import { db, schema } from "../db/index.js";
 import { UpstreamError } from "../http.js";
 import { audius, isAudiusDownloadable } from "../providers/audius.js";
-import { deezer } from "../providers/deezer.js";
 import { archive } from "../providers/archive.js";
-import { itunes } from "../providers/itunes.js";
 import { jamendo } from "../providers/jamendo.js";
 import { findFullVersion } from "../services/fullVersion.js";
+import { isConfirmedFull, isPreviewOnlyId } from "../services/fullOnly.js";
+import type { Track } from "../types.js";
 import { getTracks, resolveTrack, splitId } from "../services/tracks.js";
 import { TG_DOWNLOAD_LIMIT, telegramFileUrl } from "../telegramFiles.js";
 
@@ -73,10 +73,16 @@ async function downloadableUrl(prefix: string, raw: string): Promise<string> {
   throw new UpstreamError("Скачивание недоступно для этого трека", 403);
 }
 
+export const FULL_UNAVAILABLE = "Полная версия недоступна";
+
+export const fullStreamUrlOf = (t: Track) => {
+  const [p, r] = splitId(t.id);
+  return streamSourceUrl(p, r);
+};
+
 /** Ссылка, по которой сервер берёт аудио для плеера (клиент всегда ходит через наш сервер) */
 export async function streamSourceUrl(prefix: string, raw: string): Promise<string | null> {
-  if (prefix === "dz") return deezer.previewUrl(raw);
-  if (prefix === "it") return itunes.previewUrl(raw);
+  // Deezer и iTunes отдают только 30-секундные фрагменты — их не воспроизводим вообще
   if (prefix === "au") return audius.streamUrl(raw);
   if (prefix === "jm") return (await jamendo.raw(raw))?.audio ?? null;
   if (prefix === "ia") return archive.fileUrl(raw);
@@ -95,6 +101,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       if ((row.size ?? 0) > TG_DOWNLOAD_LIMIT) throw new UpstreamError("Файл больше 20 МБ — Telegram не позволяет его проигрывать", 413);
       return proxyAudio(req, reply, await telegramFileUrl(row.fileId), row.mime ? { "content-type": row.mime } : {});
     }
+    if (isPreviewOnlyId(`${prefix}:${raw}`)) throw new UpstreamError(FULL_UNAVAILABLE, 410);
     const url = await streamSourceUrl(prefix, raw);
     if (!url) throw new UpstreamError("Аудио недоступно", 404);
     return proxyAudio(req, reply, url);
@@ -115,6 +122,9 @@ export async function mediaRoutes(app: FastifyInstance) {
         ...(row.mime ? { "content-type": row.mime } : {}),
       });
     }
+    // Скачиваем только подтверждённые полные треки — фрагмент под видом песни не сохраняем
+    const full = await resolveTrack(id).catch(() => null);
+    if (!full || !isConfirmedFull(full)) throw new UpstreamError(`${FULL_UNAVAILABLE} — скачивать нечего`, 403);
     const url = await downloadableUrl(prefix, raw);
     return proxyAudio(req, reply, url, { "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name + ".mp3")}` });
   });
@@ -130,6 +140,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       await sendTrackToChat({ fileId: row.fileId, filename: row.fileName ?? "track.mp3", title: track.title, performer: track.artist });
       return { ok: true };
     }
+    if (!isConfirmedFull(track)) throw new UpstreamError(`${FULL_UNAVAILABLE} — отправлять нечего`, 403);
     const url = await downloadableUrl(prefix, raw);
     const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(120_000) });
     if (!res.ok || !res.body) throw new UpstreamError("Источник не отдал файл", 502);
@@ -153,11 +164,8 @@ export async function mediaRoutes(app: FastifyInstance) {
   app.get("/api/tracks/:id/full", async (req) => {
     const track = await resolveTrack((req.params as { id: string }).id);
     if (!track) throw new UpstreamError("Трек не найден", 404);
-    if (track.full) return { track, checked: [] };
-    return findFullVersion(track, (c) => {
-      const [p, r] = splitId(c.id);
-      return streamSourceUrl(p, r);
-    });
+    if (isConfirmedFull(track)) return { track, checked: [] };
+    return findFullVersion(track, { streamUrlOf: fullStreamUrlOf });
   });
 
   /** Обложки через сервер — на случай, если CDN источника заблокирован у пользователя */

@@ -1,6 +1,9 @@
 import { parseBuffer } from "music-metadata";
 import { UpstreamError } from "../http.js";
 import { TG_DOWNLOAD_LIMIT } from "../telegramFiles.js";
+import { MIN_FULL_SEC } from "./fullOnly.js";
+
+export const SHORT_FRAGMENT = `Запись короче ${MIN_FULL_SEC} с — похоже на фрагмент, а не на полный трек. Не сохраняю.`;
 
 export const IMPORT_LIMIT = TG_DOWNLOAD_LIMIT; // больше 20 МБ Telegram не отдаст боту обратно для плеера
 const AUDIO_EXT = /\.(mp3|m4a|aac|ogg|oga|opus|flac|wav)$/i;
@@ -23,6 +26,7 @@ export async function verifyAudio(buffer: Buffer, mime?: string): Promise<AudioC
   }
   const duration = meta.format.duration ?? 0;
   if (!meta.format.container || duration < 1) throw new UpstreamError("В файле нет звуковой дорожки", 422);
+  if (duration < MIN_FULL_SEC) throw new UpstreamError(SHORT_FRAGMENT, 422);
   return {
     duration: Math.round(duration),
     container: meta.format.container,

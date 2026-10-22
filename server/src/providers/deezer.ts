@@ -103,12 +103,7 @@ export const deezer = {
   async track(id: string) {
     const t = await dz(`/track/${id}`, 1800);
     if (!t?.id) throw new UpstreamError("Трек не найден", 404);
-    return { track: mapTrack(t), preview: t.preview as string, genreAlbumId: t.album?.id as number | undefined };
-  },
-  /** Свежая ссылка на превью (подписанные ссылки Deezer со временем истекают) */
-  async previewUrl(id: string): Promise<string | null> {
-    const t = await dz(`/track/${id}`, 900);
-    return t?.preview || null;
+    return { track: mapTrack(t), genreAlbumId: t.album?.id as number | undefined };
   },
   async artist(id: string) {
     return mapArtist(await dz(`/artist/${id}`, 3600));

@@ -99,7 +99,7 @@ export default function SearchPage() {
             ))}
           </div>
         ) : (
-          <EmptyState icon={<SearchIcon className="h-7 w-7" />} title="Найдите любимую музыку" text="Ищем сразу в Deezer (превью 30 с) и Audius (полные треки)." />
+          <EmptyState icon={<SearchIcon className="h-7 w-7" />} title="Найдите любимую музыку" text="Только полные треки: Audius, Internet Archive, Jamendo и ваши файлы. Совпадения из каталога Deezer проверяем — нет ли где-то полной версии." />
         )
       ) : (
         <AnimatePresence mode="wait">
@@ -113,16 +113,38 @@ export default function SearchPage() {
 }
 
 function Results({ q, tab }: { q: string; tab: Tab }) {
-  const { data, error, loading, reload } = useApi<{ items: (Track | Artist | Album)[]; fallback?: boolean }>(`/api/search?q=${enc(q)}&type=${tab}`);
+  const { data, error, loading, reload } = useApi<{ items: (Track | Artist | Album)[]; unavailable?: { id: string; title: string; artist: string; explicit: boolean }[] }>(
+    `/api/search?q=${enc(q)}&type=${tab}`,
+  );
   if (error) return <ErrorState message={error} onRetry={reload} />;
   if (loading || !data) return tab === "tracks" ? <TrackListSkeleton rows={8} /> : <GridSkeleton round={tab === "artists"} />;
-  if (!data.items.length) return <EmptyState icon={<SearchX className="h-7 w-7" />} title="Ничего не нашлось" text={`По запросу «${q}» пусто. Попробуйте написать иначе.`} />;
+  const unavailable = tab === "tracks" ? (data.unavailable ?? []) : [];
+  if (!data.items.length && !unavailable.length)
+    return <EmptyState icon={<SearchX className="h-7 w-7" />} title="Ничего не нашлось" text={`По запросу «${q}» пусто. Попробуйте написать иначе.`} />;
 
   if (tab === "tracks") {
     return (
       <>
-        {data.fallback && <p className="px-4 pb-2 text-xs text-muted">Deezer недоступен — показываю результаты iTunes.</p>}
-        <TrackList tracks={data.items as Track[]} title={`Поиск: ${q}`} />
+        {data.items.length > 0 ? (
+          <TrackList tracks={data.items as Track[]} title={`Поиск: ${q}`} />
+        ) : (
+          <EmptyState icon={<SearchX className="h-7 w-7" />} title="Полная версия недоступна" text="Полных треков по этому запросу в подключённых источниках не нашлось." />
+        )}
+        {unavailable.length > 0 && (
+          <div className="mx-4 mt-4 rounded-2xl bg-surface p-4">
+            <div className="text-xs font-bold uppercase tracking-widest text-muted">Есть в каталоге, но полной версии нет</div>
+            <ul className="mt-2 space-y-1.5">
+              {unavailable.map((u) => (
+                <li key={u.id} className="flex items-center gap-2 text-sm text-white/70">
+                  {u.explicit && <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] bg-white/60 text-[10px] font-black text-black">E</span>}
+                  <span className="truncate">
+                    {u.artist} — {u.title}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </>
     );
   }

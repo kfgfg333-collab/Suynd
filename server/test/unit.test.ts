@@ -58,15 +58,15 @@ test("сессия: только ALLOWED_USER_ID и неподделанный �
 
 test("сопоставление: полная версия с той же длительностью проходит", () => {
   const target = { title: "Blinding Lights", artist: "The Weeknd", duration: 200 };
-  assert.ok(scoreCandidate(target, { title: "Blinding Lights", artist: "The Weeknd", duration: 203, full: true }) > 0.9);
+  assert.ok(scoreCandidate(target, { title: "Blinding Lights", artist: "The Weeknd", duration: 203, full: true, source: "audius" as const }) > 0.9);
 });
 
 test("сопоставление: превью, кавер другого артиста и другая длительность отклоняются", () => {
   const target = { title: "Blinding Lights", artist: "The Weeknd", duration: 200 };
-  assert.equal(scoreCandidate(target, { title: "Blinding Lights", artist: "The Weeknd", duration: 30, full: false }), 0);
-  assert.equal(scoreCandidate(target, { title: "Blinding Lights", artist: "Random Cover Band", duration: 200, full: true }), 0);
-  assert.equal(scoreCandidate(target, { title: "Blinding Lights", artist: "The Weeknd", duration: 420, full: true }), 0);
-  assert.equal(scoreCandidate(target, { title: "Save Your Tears", artist: "The Weeknd", duration: 200, full: true }), 0);
+  assert.equal(scoreCandidate(target, { title: "Blinding Lights", artist: "The Weeknd", duration: 30, full: false, source: "deezer" as const }), 0);
+  assert.equal(scoreCandidate(target, { title: "Blinding Lights", artist: "Random Cover Band", duration: 200, full: true, source: "audius" as const }), 0);
+  assert.equal(scoreCandidate(target, { title: "Blinding Lights", artist: "The Weeknd", duration: 420, full: true, source: "audius" as const }), 0);
+  assert.equal(scoreCandidate(target, { title: "Save Your Tears", artist: "The Weeknd", duration: 200, full: true, source: "audius" as const }), 0);
 });
 
 test("нормализация названий", () => {
@@ -100,8 +100,8 @@ test("защита /api/img и импорта от внутренних адре
 });
 
 test("проверка аудио: настоящий WAV проходит с верной длительностью", async () => {
-  const r = await verifyAudio(makeWav(3), "audio/wav");
-  assert.equal(r.duration, 3);
+  const r = await verifyAudio(makeWav(60), "audio/wav");
+  assert.equal(r.duration, 60);
   assert.equal(r.container, "WAVE");
 });
 
@@ -116,5 +116,5 @@ test("сопоставление: совпадение с одним из соа
   const { splitArtists } = await import("../src/services/fullVersion.js");
   assert.deepEqual(splitArtists("Dr. Andrew Weil & Joshua Leeds"), ["Dr. Andrew Weil", "Joshua Leeds"]);
   const target = { title: "Song", artist: "Alpha & Beta feat. Gamma", duration: 180 };
-  assert.ok(scoreCandidate(target, { title: "Song", artist: "Beta", duration: 182, full: true }) > 0);
+  assert.ok(scoreCandidate(target, { title: "Song", artist: "Beta", duration: 182, full: true, source: "audius" as const }) > 0);
 });

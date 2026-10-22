@@ -10,6 +10,9 @@ import { runRadar, type Notifier } from "./services/radar.js";
 import { getTracks, upsertTracks } from "./services/tracks.js";
 import type { Track } from "./types.js";
 import { TG_DOWNLOAD_LIMIT, telegramFileUrl } from "./telegramFiles.js";
+import { UpstreamError } from "./http.js";
+import { MIN_FULL_SEC } from "./services/fullOnly.js";
+import { SHORT_FRAGMENT } from "./services/importAudio.js";
 
 let bot: Bot | null = null;
 
@@ -82,6 +85,10 @@ export async function storeLibraryFile(file: Audio | Document, buffer?: Buffer):
     }
   }
 
+  // Короткие обрезки (превью, нарезки) в библиотеку не попадают
+  if (!duration) throw new UpstreamError("Не удалось определить длительность файла — без неё не могу подтвердить, что это полный трек", 422);
+  if (duration < MIN_FULL_SEC) throw new UpstreamError(SHORT_FRAGMENT, 422);
+
   const row = db
     .insert(schema.libraryFiles)
     .values({
@@ -122,7 +129,14 @@ export async function storeLibraryFile(file: Audio | Document, buffer?: Buffer):
 }
 
 async function saveAudio(ctx: Context, file: Audio | Document) {
-  const { track, existed } = await storeLibraryFile(file);
+  let result: Awaited<ReturnType<typeof storeLibraryFile>>;
+  try {
+    result = await storeLibraryFile(file);
+  } catch (err) {
+    await ctx.reply(`⚠️ ${(err as Error).message}`);
+    return;
+  }
+  const { track, existed } = result;
   if (existed) {
     await ctx.reply("Этот файл уже есть в вашей библиотеке 👌", { reply_markup: openButton() });
     return;

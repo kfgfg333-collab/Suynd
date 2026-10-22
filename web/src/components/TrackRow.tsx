@@ -79,7 +79,7 @@ export const TrackRow = memo(function TrackRow({ track, onPlay, index, showCover
           </div>
         </button>
         {liked && <Heart className="h-4 w-4 shrink-0 fill-accent text-accent" />}
-        <span className="hidden w-10 shrink-0 text-right text-xs text-muted min-[380px]:block">{formatTime(track.full ? track.duration : 30)}</span>
+        <span className="hidden w-10 shrink-0 text-right text-xs text-muted min-[380px]:block">{formatTime(track.duration)}</span>
         <button
           aria-label="Ещё"
           className="-mr-2 flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted active:bg-white/10"

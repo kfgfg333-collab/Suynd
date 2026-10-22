@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { api, enc, mediaUrl, SOURCE_LABELS, streamUrl } from "../lib/api";
 import { getOffline } from "../lib/offline";
 import { shuffleArray } from "../lib/format";
+import { FULL_UNAVAILABLE, isFullLengthAudio, isFullTrack, onlyFull, planPlayback } from "../lib/fullOnly";
 import { haptic } from "../lib/telegram";
 import type { Track, WaveEnergy, WaveMode } from "../lib/types";
 import { useLibrary } from "./library";
@@ -99,7 +100,7 @@ async function loadTrack(track: Track, autoplay: boolean) {
     if (entry) src = blobUrl = URL.createObjectURL(entry.blob);
   }
   audio.src = src;
-  usePlayer.setState({ currentTime: 0, duration: track.full ? track.duration : Math.min(30, track.duration || 30), buffering: autoplay });
+  usePlayer.setState({ currentTime: 0, duration: track.duration, buffering: autoplay });
   updateMediaSession(track);
   if (autoplay) {
     audio.play().catch((e) => {
@@ -127,6 +128,18 @@ audio.addEventListener("playing", () => {
 });
 audio.addEventListener("durationchange", () => {
   if (Number.isFinite(audio.duration) && audio.duration > 0) usePlayer.setState({ duration: audio.duration });
+});
+// Последняя линия защиты: если источник прислал обрезок вместо песни — не играем его
+audio.addEventListener("loadedmetadata", () => {
+  const track = usePlayer.getState().current();
+  if (!track || !Number.isFinite(audio.duration)) return;
+  if (!isFullLengthAudio(track.duration, audio.duration)) {
+    audio.pause();
+    audio.removeAttribute("src");
+    usePlayer.setState({ isPlaying: false, buffering: false });
+    toast(`«${track.title}»: источник отдал фрагмент. ${FULL_UNAVAILABLE}`, "error");
+    setTimeout(() => usePlayer.getState().next(), 600);
+  }
 });
 audio.addEventListener("timeupdate", () => {
   const t = audio.currentTime;
@@ -176,7 +189,7 @@ function updateMediaSession(track: Track) {
   navigator.mediaSession.metadata = new MediaMetadata({
     title: track.title,
     artist: track.artist,
-    album: track.album ?? (track.full ? "" : "Превью 30 с"),
+    album: track.album ?? "",
     artwork: cover ? [{ src: cover, sizes: "512x512", type: "image/jpeg" }] : [],
   });
 }
@@ -213,7 +226,9 @@ function fetchWave(): Promise<void> {
         body: { ...wave, exclude: queue.map((q) => q.track.id) },
       });
       const known = new Set(usePlayer.getState().queue.map((q) => q.track.id));
-      const fresh = items.filter((t) => !known.has(t.id)).map((t) => toItem(t));
+      const fresh = onlyFull(items)
+        .filter((t) => !known.has(t.id))
+        .map((t) => toItem(t));
       if (usePlayer.getState().context?.kind === "wave") usePlayer.setState({ queue: [...usePlayer.getState().queue, ...fresh] });
     } catch (e) {
       toast(`Волна: ${(e as Error).message}`, "error");
@@ -250,8 +265,17 @@ export const usePlayer = create<PlayerState>((set, get) => ({
 
   current: () => get().queue[get().index]?.track ?? null,
 
-  playList(tracks, start = 0, title = "") {
-    if (!tracks.length) return;
+  playList(allTracks, start = 0, title = "") {
+    if (!allTracks.length) return;
+    // Только полные треки: превью не попадают в очередь, а на «не полный» трек плеер не стартует
+    const plan = planPlayback(allTracks, start);
+    if (!plan) {
+      haptic.error();
+      toast(FULL_UNAVAILABLE, "error");
+      return;
+    }
+    const tracks = plan.queue;
+    start = plan.index;
     haptic.impact("light");
     const cur = get().current();
     // Нажали на уже играющий трек — просто пауза/плей
@@ -270,8 +294,9 @@ export const usePlayer = create<PlayerState>((set, get) => ({
     void loadTrack(items[index].track, true);
   },
 
-  playShuffled(tracks, title = "") {
-    if (!tracks.length) return;
+  playShuffled(allTracks, title = "") {
+    const tracks = onlyFull(allTracks);
+    if (!tracks.length) return toast(FULL_UNAVAILABLE, "error");
     const shuffled = shuffleArray(tracks);
     set({ shuffle: false });
     get().playList(shuffled, 0, title);
@@ -337,6 +362,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   },
 
   addToQueue(t) {
+    if (!isFullTrack(t)) return toast(FULL_UNAVAILABLE, "error");
     const { queue, index } = get();
     if (index < 0) {
       get().playList([t], 0);
@@ -354,6 +380,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   },
 
   playNext(t) {
+    if (!isFullTrack(t)) return toast(FULL_UNAVAILABLE, "error");
     const { queue, index } = get();
     if (index < 0) {
       get().playList([t], 0);
@@ -451,27 +478,27 @@ export const usePlayer = create<PlayerState>((set, get) => ({
 
   /** Ищет полную версию превью в легальных полных источниках и подменяет её в очереди */
   async findFull(track) {
-    toast("Ищу полную версию…");
+    toast(`Ищу полную версию «${track.title}»…`);
     try {
       const r = await api<{ track: Track | null; checked: { source: string; title: string; ok: boolean }[] }>(`/api/tracks/${enc(track.id)}/full`);
       if (!r.track) {
         haptic.error();
         toast(
           r.checked.length
-            ? "Похожие записи нашлись, но ни одна не отдаёт аудио — пропускаю"
-            : "Полной версии в открытых источниках нет (Audius, Jamendo, Internet Archive, ваши файлы)",
+            ? `${FULL_UNAVAILABLE}: похожие записи нашлись, но ни одна не прошла проверку аудио`
+            : `${FULL_UNAVAILABLE} в подключённых источниках (Audius, Jamendo, Internet Archive, ваши файлы)`,
           "error",
         );
         return;
       }
       const found = r.track;
-      const { queue, index } = get();
-      if (queue[index]?.track.id === track.id) {
-        set({ queue: queue.map((q, i) => (i === index ? { ...q, track: found } : q)) });
-        void loadTrack(found, true);
-      } else {
-        get().playNext(found);
+      if (!isFullTrack(found)) {
+        toast(FULL_UNAVAILABLE, "error");
+        return;
       }
+      const { index } = get();
+      if (index < 0 || !get().isPlaying) get().playList([found], 0, `${found.artist} — ${found.title}`);
+      else get().playNext(found);
       haptic.success();
       toast(`Полная версия: ${SOURCE_LABELS[found.source]}`, "success");
     } catch (e) {
