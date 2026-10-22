@@ -1,5 +1,6 @@
 /* Офлайн-хранилище: аудио лежит в IndexedDB браузера Telegram. */
 import { downloadUrl } from "./api";
+import { FULL_UNAVAILABLE, isFullLengthAudio, isFullTrack } from "./fullOnly";
 import type { Track } from "./types";
 
 export interface OfflineEntry {
@@ -61,7 +62,25 @@ export async function clearOffline() {
 }
 
 /** Скачать трек с прогрессом и положить в IndexedDB */
+/** Реальная длительность скачанного файла (браузер читает заголовки аудио) */
+function blobDuration(blob: Blob): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    const a = new Audio();
+    const done = (v: number) => {
+      URL.revokeObjectURL(url);
+      resolve(v);
+    };
+    a.preload = "metadata";
+    a.onloadedmetadata = () => done(a.duration);
+    a.onerror = () => done(NaN);
+    setTimeout(() => done(NaN), 15000);
+    a.src = url;
+  });
+}
+
 export async function saveOffline(track: Track, onProgress: (p: number) => void, signal?: AbortSignal): Promise<OfflineEntry> {
+  if (!isFullTrack(track) || !track.downloadable) throw new Error(`${FULL_UNAVAILABLE} — скачивать нечего`);
   const res = await fetch(downloadUrl(track), { signal });
   if (!res.ok || !res.body) {
     const data = await res.json().catch(() => ({}));
@@ -79,6 +98,15 @@ export async function saveOffline(track: Track, onProgress: (p: number) => void,
     onProgress(total ? loaded / total : Math.min(0.95, loaded / (8 * 1024 * 1024)));
   }
   const blob = new Blob(chunks as BlobPart[], { type: res.headers.get("content-type") ?? "audio/mpeg" });
+  // Не сохраняем обрезок под видом полной песни: проверяем фактическую длительность файла
+  const actual = await blobDuration(blob);
+  if (!isFullLengthAudio(track.duration, actual)) {
+    throw new Error(
+      Number.isFinite(actual)
+        ? `Скачанный файл длится ${Math.round(actual)} с вместо ${track.duration} с — это не полный трек, не сохраняю`
+        : "Не удалось прочитать длительность файла — не сохраняю",
+    );
+  }
   const entry: OfflineEntry = { id: track.id, track, blob, size: blob.size, savedAt: Date.now() };
   await tx("readwrite", (s) => s.put(entry));
   navigator.storage?.persist?.().catch(() => {});

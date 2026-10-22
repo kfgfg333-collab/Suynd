@@ -18,7 +18,7 @@ const GENRES = ["", "Electronic", "Hip-Hop/Rap", "Pop", "Alternative", "R&B/Soul
 
 export default function HomePage() {
   const version = useLibrary((s) => s.version);
-  const home = useApi<{ chart: Track[]; chartAlbums: Album[]; trending: Track[] }>("/api/home");
+  const home = useApi<{ chartAlbums: Album[]; trending: Track[] }>("/api/home");
   const recent = useApi<{ items: Track[] }>("/api/history/recent", [version]);
   const releases = useApi<{ items: Release[] }>("/api/releases", [version]);
   const name = telegramUserName();
@@ -55,17 +55,6 @@ export default function HomePage() {
       )}
 
       <section>
-        <SectionHeader title="Чарт" />
-        {home.error ? (
-          <ErrorState message={home.error} onRetry={home.reload} />
-        ) : home.loading ? (
-          <TrackListSkeleton rows={5} />
-        ) : (
-          <TrackList tracks={home.data!.chart.slice(0, 10)} title="Чарт" numbered />
-        )}
-      </section>
-
-      <section>
         <SectionHeader title="Популярные альбомы" />
         {home.loading ? (
           <CardsSkeleton />
@@ -80,7 +69,7 @@ export default function HomePage() {
         )}
       </section>
 
-      <Trending initial={home.data?.trending} loading={home.loading} />
+      {home.error ? <ErrorState message={home.error} onRetry={home.reload} /> : <Trending initial={home.data?.trending} loading={home.loading} />}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 /* Акцентный цвет из обложки: берём самый «живой» цвет, а не просто средний. */
 const cache = new Map<string, string>();
-export const DEFAULT_ACCENT = "124 92 255";
+const DEFAULT_ACCENT = "124 92 255";
 
 function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
   r /= 255;

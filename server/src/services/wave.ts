@@ -3,6 +3,8 @@ import { db, schema } from "../db/index.js";
 import { audius, moodEnergy } from "../providers/audius.js";
 import { deezer } from "../providers/deezer.js";
 import type { Track } from "../types.js";
+import { isConfirmedFull } from "./fullOnly.js";
+import { normalize } from "./match.js";
 import { getTracks, splitId, upsertTracks } from "./tracks.js";
 
 export type WaveMode = "familiar" | "mix" | "new";
@@ -85,10 +87,27 @@ function buildProfile(): Profile {
   return { artistWeights: weights, genres, favorites, excludedTracks, blocked, artistScore };
 }
 
-async function topTracksOf(artistKey: string, limit: number): Promise<Track[]> {
+const twinCache = new Map<string, string | null>();
+
+/** Артист Deezer → тот же артист на Audius (по точному имени), где есть полные треки */
+async function audiusTwinOf(artistKey: string, name?: string): Promise<string | null> {
+  if (twinCache.has(artistKey)) return twinCache.get(artistKey)!;
+  const artistName = name ?? (await safe(deezer.artist(splitId(artistKey)[1]), null))?.name;
+  if (!artistName) return null;
+  const list = await safe(audius.searchArtists(artistName, 5), []);
+  const twin = list.find((a) => normalize(a.name) === normalize(artistName))?.id ?? null;
+  twinCache.set(artistKey, twin);
+  return twin;
+}
+
+/** Полные треки артиста. У Deezer только превью, поэтому для его артистов берём «двойника» на Audius */
+async function topTracksOf(artistKey: string, limit: number, name?: string): Promise<Track[]> {
   const [prefix, raw] = splitId(artistKey);
-  if (prefix === "dz") return safe(deezer.artistTop(raw, limit), []);
   if (prefix === "au") return safe(audius.artistTracks(raw, "plays", limit), []);
+  if (prefix === "dz") {
+    const twin = await audiusTwinOf(artistKey, name);
+    return twin ? safe(audius.artistTracks(splitId(twin)[1], "plays", limit), []) : [];
+  }
   return [];
 }
 
@@ -101,7 +120,7 @@ async function relatedOf(artistKey: string): Promise<{ id: string; name: string 
 
 async function familiarCandidates(p: Profile): Promise<Track[]> {
   const seeds = weightedPick([...p.artistWeights.entries()].map(([key, v]) => ({ item: key, weight: v.weight })), 6);
-  const tops = await Promise.all(seeds.map((key) => topTracksOf(key, 15)));
+  const tops = await Promise.all(seeds.map((key) => topTracksOf(key, 15, p.artistWeights.get(key)?.name)));
   const favs = sample(p.favorites, 8);
   return [...tops.flat(), ...favs];
 }
@@ -116,15 +135,15 @@ async function newCandidates(p: Profile): Promise<Track[]> {
   );
   const genres = p.genres.length ? p.genres : FALLBACK_GENRES;
   const [tops, trending] = await Promise.all([
-    Promise.all(fresh.map((a) => topTracksOf(a.id, 6))),
+    Promise.all(fresh.map((a) => topTracksOf(a.id, 6, a.name))),
     Promise.all(sample(genres, 2).map((g) => safe(audius.trending(g, 25), []))),
   ]);
   return [...tops.flat(), ...trending.flat()];
 }
 
 async function coldStart(): Promise<Track[]> {
-  const [chart, trending] = await Promise.all([safe(deezer.chartTracks(50), []), safe(audius.trending(null, 30), [])]);
-  return [...chart, ...trending];
+  const lists = await Promise.all([safe(audius.trending(null, 40), []), ...sample(FALLBACK_GENRES, 2).map((g) => safe(audius.trending(g, 20), []))]);
+  return lists.flat();
 }
 
 /** Подходит ли трек под «Спокойное/Энергичное» */
@@ -157,6 +176,7 @@ export async function nextWaveBatch(opts: { mode: WaveMode; energy: WaveEnergy; 
   }
 
   const usable = (t: Track) =>
+    isConfirmedFull(t) &&
     !p.excludedTracks.has(t.id) && !(t.artistId && p.blocked.has(t.artistId)) && (t.artistId ? (p.artistScore.get(t.artistId) ?? 0) > -3 : true);
 
   const score = (t: Track) => {

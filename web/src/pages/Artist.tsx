@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { Bell, BellRing, Play } from "lucide-react";
 import { useParams } from "react-router-dom";
 import { AlbumCard, ArtistCard, Carousel } from "../components/Cards";
+import { CatalogList } from "../components/CatalogRow";
 import { TrackList } from "../components/TrackRow";
 import { CardsSkeleton, Cover, ErrorState, SectionHeader, Skeleton, TrackListSkeleton } from "../components/ui";
 import { mediaUrl } from "../lib/api";
@@ -14,6 +15,7 @@ import { usePlayer } from "../store/player";
 interface ArtistData {
   artist: Artist;
   top: Track[];
+  catalog?: Track[];
   latest?: Track[];
   albums: Album[];
   related: Artist[];
@@ -36,7 +38,7 @@ export default function ArtistPage() {
       </div>
     );
 
-  const { artist, top, latest, albums, related } = data;
+  const { artist, top, latest, albums, related, catalog = [] } = data;
   const picture = mediaUrl(artist.picture);
 
   return (
@@ -78,9 +80,20 @@ export default function ArtistPage() {
       )}
 
       <section className="mt-4">
-        <SectionHeader title="Популярные треки" />
-        {top.length ? <TrackList tracks={top.slice(0, 10)} title={artist.name} numbered /> : <p className="px-4 text-sm text-muted">Треков пока нет.</p>}
+        <SectionHeader title="Полные треки" />
+        {top.length ? (
+          <TrackList tracks={top.slice(0, 10)} title={artist.name} numbered />
+        ) : (
+          <p className="px-4 pb-2 text-sm text-muted">Полных треков этого артиста в подключённых источниках нет.</p>
+        )}
       </section>
+
+      {catalog.length > 0 && (
+        <section className="mt-6">
+          <SectionHeader title="Из каталога" />
+          <CatalogList tracks={catalog.slice(0, 10)} numbered />
+        </section>
+      )}
 
       {albums.length > 0 && (
         <section className="mt-8">

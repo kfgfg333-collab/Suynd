@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, enc } from "../lib/api";
+import { api, enc, SOURCE_LABELS } from "../lib/api";
 import { confirmDialog, haptic, openLink } from "../lib/telegram";
 import type { Playlist, Track } from "../lib/types";
 import { useLibrary } from "../store/library";
@@ -77,7 +77,10 @@ function MainActions({ track, ctx, onPlaylists }: { track: Track; ctx: { playlis
         <div className="min-w-0 flex-1">
           <div className="truncate font-bold">{track.title}</div>
           <div className="truncate text-sm text-muted">{track.artist}</div>
-          <SourceBadge track={track} className="mt-1" />
+          <div className="mt-1 flex items-center gap-1.5">
+            <SourceBadge track={track} />
+            <span className="text-[11px] text-muted">{SOURCE_LABELS[track.source]}</span>
+          </div>
         </div>
       </div>
       <div className="h-px bg-line" />
@@ -101,9 +104,9 @@ function MainActions({ track, ctx, onPlaylists }: { track: Track; ctx: { playlis
       {track.links && (
         <>
           <div className="mx-5 my-1 h-px bg-line" />
-          <SheetItem icon={<ExternalLink />} label="Открыть в Яндекс Музыке" onClick={run(() => openLink(track.links!.yandex))} />
-          <SheetItem icon={<ExternalLink />} label="Открыть в Spotify" onClick={run(() => openLink(track.links!.spotify))} />
-          <SheetItem icon={<ExternalLink />} label="Открыть в YouTube Music" onClick={run(() => openLink(track.links!.youtube))} />
+          {track.links.deezer && <SheetItem icon={<ExternalLink />} label="Открыть в Deezer" onClick={run(() => openLink(track.links!.deezer!))} />}
+          <SheetItem icon={<ExternalLink />} label="Найти в Spotify" onClick={run(() => openLink(track.links!.spotify))} />
+          <SheetItem icon={<ExternalLink />} label="Найти в Яндекс Музыке" onClick={run(() => openLink(track.links!.yandex))} />
         </>
       )}
       <div className="mx-5 my-1 h-px bg-line" />

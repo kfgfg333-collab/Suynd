@@ -1,9 +1,12 @@
 import type { FastifyInstance } from "fastify";
+import { mapLimit, UpstreamError } from "../http.js";
 import { audius } from "../providers/audius.js";
 import { deezer } from "../providers/deezer.js";
-import { itunes } from "../providers/itunes.js";
+import { onlyFull } from "../services/fullOnly.js";
+import { normalize } from "../services/match.js";
+import { sanitizeQuery, search } from "../services/search.js";
 import { resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
-import { UpstreamError } from "../http.js";
+import { webSearch } from "../services/web.js";
 import type { Track } from "../types.js";
 
 /** Чередуем результаты двух источников, чтобы в выдаче были оба */
@@ -19,11 +22,17 @@ function interleave<T>(a: T[], b: T[], bEvery = 3): T[] {
 
 const settled = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
 
+/** Тот же артист на Audius (по точному имени) — у него есть полные треки */
+async function audiusTwin(name: string) {
+  const list = await settled(audius.searchArtists(name, 5), []);
+  return list.find((a) => normalize(a.name) === normalize(name)) ?? null;
+}
+
 export async function catalogRoutes(app: FastifyInstance) {
   app.get("/api/search", async (req) => {
     const { q = "", type = "tracks" } = req.query as { q?: string; type?: string };
-    const query = q.trim().slice(0, 100);
-    if (!query) return { items: [] };
+    const query = sanitizeQuery(q);
+    if (!query) return type === "tracks" ? await search.findBest("") : { items: [] };
 
     if (type === "artists") {
       const [dz, au] = await Promise.all([settled(deezer.searchArtists(query), []), settled(audius.searchArtists(query, 8), [])]);
@@ -34,35 +43,26 @@ export async function catalogRoutes(app: FastifyInstance) {
       return { items: interleave(dz, au, 4) };
     }
 
-    let dz: Track[] = [];
-    let dzFailed = false;
-    try {
-      dz = await deezer.searchTracks(query);
-    } catch {
-      dzFailed = true;
-    }
-    const [au, it] = await Promise.all([
-      settled(audius.searchTracks(query, 15), []),
-      dzFailed ? settled(itunes.searchTracks(query), []) : Promise.resolve([]),
-    ]);
-    const items = interleave(dzFailed ? it : dz, au, 3);
-    upsertTracks(items);
-    return { items, fallback: dzFailed };
+    // Треки: один лучший проверенный результат из разрешённых источников (см. services/search.ts)
+    return search.findBest(query);
   });
 
+  /**
+   * Где ещё в интернете можно послушать трек: страницы из официальных поисковых API, проверенные как превью ссылки.
+   * Звук с этих сайтов Suynd не проигрывает — клиент открывает страницу в браузере.
+   */
+  app.get("/api/search/web", async (req) => webSearch.search(sanitizeQuery((req.query as { q?: string }).q)));
+
   app.get("/api/home", async () => {
-    const [chart, chartAlbums, trending] = await Promise.all([
-      settled(deezer.chartTracks(20), []),
-      settled(deezer.chartAlbums(12), []),
-      settled(audius.trending(null, 20), []),
-    ]);
-    upsertTracks([...chart, ...trending]);
-    return { chart, chartAlbums, trending };
+    const [chartAlbums, trending] = await Promise.all([settled(deezer.chartAlbums(12), []), settled(audius.trending(null, 30), [])]);
+    const full = onlyFull(trending);
+    upsertTracks(full);
+    return { chartAlbums, trending: full };
   });
 
   app.get("/api/trending", async (req) => {
     const { genre } = req.query as { genre?: string };
-    const items = await audius.trending(genre || null, 30);
+    const items = onlyFull(await audius.trending(genre || null, 30));
     upsertTracks(items);
     return { items };
   });
@@ -70,14 +70,17 @@ export async function catalogRoutes(app: FastifyInstance) {
   app.get("/api/artists/:id", async (req) => {
     const [prefix, raw] = splitId((req.params as { id: string }).id);
     if (prefix === "dz") {
-      const [artist, top, albums, related] = await Promise.all([
+      const [artist, catalog, albums, related] = await Promise.all([
         deezer.artist(raw),
         settled(deezer.artistTop(raw, 20), []),
         settled(deezer.artistAlbums(raw, 50), []),
         settled(deezer.artistRelated(raw, 12), []),
       ]);
-      upsertTracks(top);
-      return { artist, top, albums, related };
+      // Полные треки этого артиста — если он сам публикуется на Audius
+      const twin = await audiusTwin(artist.name);
+      const top = twin ? onlyFull(await settled(audius.artistTracks(splitId(twin.id)[1], "plays", 20), [])) : [];
+      upsertTracks([...catalog, ...top]);
+      return { artist, top, catalog, albums, related, audiusTwin: twin };
     }
     if (prefix === "au") {
       const [artist, top, latest, related] = await Promise.all([
@@ -86,38 +89,53 @@ export async function catalogRoutes(app: FastifyInstance) {
         settled(audius.artistTracks(raw, "date", 10), []),
         settled(audius.artistRelated(raw, 12), []),
       ]);
-      upsertTracks([...top, ...latest]);
-      return { artist, top, latest, albums: [], related };
+      const [fullTop, fullLatest] = [onlyFull(top), onlyFull(latest)];
+      upsertTracks([...fullTop, ...fullLatest]);
+      return { artist, top: fullTop, latest: fullLatest, catalog: [], albums: [], related };
     }
     throw new UpstreamError("Неизвестный артист", 404);
   });
 
   app.get("/api/albums/:id", async (req) => {
     const [prefix, raw] = splitId((req.params as { id: string }).id);
-    const result = prefix === "dz" ? await deezer.album(raw) : prefix === "au" ? await audius.playlist(raw) : null;
-    if (!result) throw new UpstreamError("Неизвестный альбом", 404);
-    upsertTracks(result.tracks);
-    return { album: result.album, tracks: result.tracks };
+    if (prefix === "dz") {
+      const result = await deezer.album(raw);
+      upsertTracks(result.tracks);
+      // Треки альбома Deezer — каталог: полную версию ищем по нажатию
+      return { album: result.album, tracks: [], catalog: result.tracks };
+    }
+    if (prefix === "au") {
+      const result = await audius.playlist(raw);
+      const tracks = onlyFull(result.tracks);
+      upsertTracks(tracks);
+      return { album: result.album, tracks, catalog: [] };
+    }
+    throw new UpstreamError("Неизвестный альбом", 404);
   });
 
-  /** «Похожее» для трека: топ похожих артистов */
+  /** «Похожее»: полные треки похожих артистов */
   app.get("/api/tracks/:id/similar", async (req) => {
     const id = (req.params as { id: string }).id;
     const track = await resolveTrack(id);
-    if (!track?.artistId) return { items: [] };
-    const [prefix, raw] = splitId(track.artistId);
+    if (!track) return { items: [] };
     let items: Track[] = [];
-    if (prefix === "dz") {
-      const related = await settled(deezer.artistRelated(raw, 8), []);
-      const tops = await Promise.all(related.map((a) => settled(deezer.artistTop(splitId(a.id)[1], 3), [])));
-      items = tops.flat();
-    } else if (prefix === "au") {
+    const [prefix, raw] = splitId(track.artistId ?? "");
+    if (prefix === "au") {
       const related = await settled(audius.artistRelated(raw, 8), []);
       const tops = await Promise.all(related.map((a) => settled(audius.artistTracks(splitId(a.id)[1], "plays", 3), [])));
       items = tops.flat();
-      if (items.length < 5 && track.genre) items = items.concat(await settled(audius.trending(track.genre, 15), []));
+    } else if (prefix === "dz") {
+      // Похожие артисты Deezer → их «двойники» на Audius с полными треками
+      const related = await settled(deezer.artistRelated(raw, 8), []);
+      const twins = await mapLimit(related, 3, (a) => audiusTwin(a.name));
+      const tops = await Promise.all(twins.filter(Boolean).map((a) => settled(audius.artistTracks(splitId(a!.id)[1], "plays", 3), [])));
+      items = tops.flat();
     }
-    items = items.filter((t) => t.id !== id).sort(() => Math.random() - 0.5).slice(0, 25);
+    if (items.length < 5 && track.genre) items = items.concat(await settled(audius.trending(track.genre, 15), []));
+    items = onlyFull(items)
+      .filter((t) => t.id !== id)
+      .sort(() => Math.random() - 0.5)
+      .slice(0, 25);
     upsertTracks(items);
     return { items };
   });

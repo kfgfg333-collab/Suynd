@@ -198,7 +198,7 @@ function Progress({ track }: { track: Track }) {
   const seek = usePlayer((s) => s.seek);
   const [dragging, setDragging] = useState<number | null>(null);
   const value = dragging ?? currentTime;
-  const max = duration || (track.full ? track.duration : 30);
+  const max = duration || track.duration;
   const pct = max ? (value / max) * 100 : 0;
   return (
     <div className="pt-4">
@@ -227,7 +227,7 @@ function Progress({ track }: { track: Track }) {
       />
       <div className="flex justify-between text-xs font-semibold text-white/60">
         <span>{formatTime(value)}</span>
-        <span>{track.full ? formatTime(max) : `${formatTime(max)} · превью`}</span>
+        <span>{formatTime(max)}</span>
       </div>
     </div>
   );
@@ -329,7 +329,7 @@ function BottomActions({ track, queueOpen, onQueue }: { track: Track; queueOpen:
   );
 }
 
-export function ProgressRing({ value, size = 22 }: { value: number; size?: number }) {
+function ProgressRing({ value, size = 22 }: { value: number; size?: number }) {
   const r = size / 2 - 2;
   const c = 2 * Math.PI * r;
   return (

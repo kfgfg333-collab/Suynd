@@ -1,6 +1,6 @@
 import { getJson, UpstreamError } from "../http.js";
 import type { Album, Artist, Track } from "../types.js";
-import { externalLinks } from "./links.js";
+import { officialLinks } from "./links.js";
 
 const BASE = "https://api.deezer.com";
 
@@ -17,7 +17,7 @@ async function dz<T = DzObj>(path: string, ttlSec = 600): Promise<T> {
   return data as T;
 }
 
-export function mapTrack(t: DzObj, album?: DzObj): Track {
+function mapTrack(t: DzObj, album?: DzObj): Track {
   const alb = t.album ?? album;
   const artist = t.artist?.name ?? "Неизвестный артист";
   return {
@@ -34,11 +34,11 @@ export function mapTrack(t: DzObj, album?: DzObj): Track {
     downloadable: false,
     bpm: t.bpm || null,
     explicit: Boolean(t.explicit_lyrics),
-    links: externalLinks(artist, t.title_short || t.title),
+    links: officialLinks(artist, t.title_short || t.title, t.id),
   };
 }
 
-export function mapArtist(a: DzObj): Artist {
+function mapArtist(a: DzObj): Artist {
   return {
     id: `dz:${a.id}`,
     source: "deezer",
@@ -48,7 +48,7 @@ export function mapArtist(a: DzObj): Artist {
   };
 }
 
-export function mapAlbum(a: DzObj, artist?: DzObj): Album {
+function mapAlbum(a: DzObj, artist?: DzObj): Album {
   const art = a.artist ?? artist;
   return {
     id: `dz:${a.id}`,
@@ -63,12 +63,34 @@ export function mapAlbum(a: DzObj, artist?: DzObj): Album {
   };
 }
 
+/**
+ * Deezer часто отдаёт и цензурную (clean / radio edit), и explicit-версию одного трека.
+ * Оставляем одну — explicit, если она есть.
+ */
+export function preferExplicit(list: Track[]): Track[] {
+  const key = (t: Track) =>
+    `${t.artist}|${t.title}`
+      .toLowerCase()
+      .replace(/\((clean|radio edit|edited|censored|explicit)[^)]*\)/g, "")
+      .replace(/\s+-\s+(clean|radio edit|edited|censored|explicit).*$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const chosen = new Map<string, Track>();
+  for (const t of list) {
+    const k = key(t);
+    const prev = chosen.get(k);
+    if (!prev || (!prev.explicit && t.explicit)) chosen.set(k, t);
+  }
+  const keep = new Set([...chosen.values()].map((t) => t.id));
+  return list.filter((t) => keep.has(t.id));
+}
+
 const readable = (t: DzObj) => t.readable !== false && t.preview;
 
 export const deezer = {
   async searchTracks(q: string, limit = 25) {
-    const r = await dz(`/search?q=${encodeURIComponent(q)}&limit=${limit}`, 300);
-    return (r.data as DzObj[]).filter(readable).map((t) => mapTrack(t));
+    const r = await dz(`/search?q=${encodeURIComponent(q)}&limit=${Math.min(50, limit * 2)}`, 300);
+    return preferExplicit((r.data as DzObj[]).filter(readable).map((t) => mapTrack(t))).slice(0, limit);
   },
   async searchArtists(q: string, limit = 20) {
     const r = await dz(`/search/artist?q=${encodeURIComponent(q)}&limit=${limit}`, 300);
@@ -81,12 +103,7 @@ export const deezer = {
   async track(id: string) {
     const t = await dz(`/track/${id}`, 1800);
     if (!t?.id) throw new UpstreamError("Трек не найден", 404);
-    return { track: mapTrack(t), preview: t.preview as string, genreAlbumId: t.album?.id as number | undefined };
-  },
-  /** Свежая ссылка на превью (подписанные ссылки Deezer со временем истекают) */
-  async previewUrl(id: string): Promise<string | null> {
-    const t = await dz(`/track/${id}`, 900);
-    return t?.preview || null;
+    return { track: mapTrack(t), genreAlbumId: t.album?.id as number | undefined };
   },
   async artist(id: string) {
     return mapArtist(await dz(`/artist/${id}`, 3600));

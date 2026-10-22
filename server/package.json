@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/unit.test.ts test/no-previews.test.ts test/sources-extra.test.ts test/search.test.ts test/web.test.ts",
+    "test:live": "tsx --test test/sources.live.test.ts test/full-sources.live.test.ts test/web.live.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.1",

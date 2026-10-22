@@ -25,6 +25,25 @@ export const env = {
   devAuthBypass: !isProd && process.env.DEV_AUTH_BYPASS === "true",
   // Отключить бота (например, для локальных тестов без интернета до Telegram)
   botDisabled: process.env.BOT_DISABLED === "true",
+  // Необязательно: бесплатный ключ Jamendo (https://devportal.jamendo.com) — ещё один источник полных треков
+  jamendoClientId: process.env.JAMENDO_CLIENT_ID?.trim() || "",
+  // Кэш полных аудиофайлов на диске сервера (CC-источники и ваши файлы). 0 — выключить
+  audioCacheMb: Number(process.env.AUDIO_CACHE_MB ?? 1024),
+  // Необязательно: веб-поиск страниц, где можно послушать трек (официальные поисковые API)
+  webSearch: {
+    // Tavily: бесплатно 1000 запросов в месяц без карты — https://app.tavily.com
+    tavilyApiKey: process.env.TAVILY_API_KEY?.trim() || "",
+    // Яндекс Search API (платный, лучше всех находит русскоязычные страницы) — ключ сервисного аккаунта и каталог
+    yandexApiKey: process.env.YANDEX_SEARCH_API_KEY?.trim() || "",
+    yandexFolderId: process.env.YANDEX_FOLDER_ID?.trim() || "",
+    // Потолок запросов к поисковым API в месяц (защита бюджета); 0 — без ограничения
+    monthlyLimit: Number(process.env.WEB_SEARCH_MONTHLY_LIMIT ?? 900),
+    // Домены, которые никогда не показывать (через запятую)
+    blockedDomains: (process.env.WEB_SEARCH_BLOCKED_DOMAINS ?? "")
+      .split(",")
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean),
+  },
 };
 
 if (!Number.isFinite(env.allowedUserId) || env.allowedUserId <= 0) {

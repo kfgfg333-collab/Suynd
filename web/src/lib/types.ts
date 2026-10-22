@@ -1,4 +1,50 @@
-export type Source = "deezer" | "audius" | "library" | "itunes";
+export type Source = "deezer" | "audius" | "library" | "archive" | "jamendo" | "openverse";
+
+/** Официальные ссылки (только переход на страницу, без аудио) */
+export interface OfficialLinks {
+  deezer?: string;
+  spotify: string;
+  yandex: string;
+}
+
+/** Ответ поиска треков: один лучший проверенный результат */
+export interface BestResult {
+  query: string;
+  mode: "track" | "artist";
+  best: Track | null;
+  more: Track[];
+  catalog: { id: string; title: string; artist: string; cover: string | null; duration: number; explicit: boolean } | null;
+  links: OfficialLinks | null;
+  partial: boolean;
+}
+
+/** Страница в интернете, где можно послушать трек (открывается в браузере, Suynd её звук не проигрывает) */
+export interface WebResult {
+  url: string;
+  domain: string;
+  site: string;
+  official: boolean;
+  title: string;
+  artist: string;
+  cover: string | null;
+  duration: number | null;
+  durationSource: "page" | "catalog" | null;
+  verified: "ok" | "blocked" | "robots" | "gone" | "error";
+  songPage: boolean;
+  audioTag: boolean;
+  note: string;
+}
+
+export interface WebSearchResult {
+  query: string;
+  configured: boolean;
+  target: { title: string; artist: string; duration: number | null; cover: string | null } | null;
+  best: WebResult | null;
+  others: WebResult[];
+  partial: boolean;
+  notice: string | null;
+  ms: number;
+}
 
 export interface Track {
   id: string;
@@ -17,7 +63,9 @@ export interface Track {
   mood?: string | null;
   explicit?: boolean;
   releaseDate?: string | null;
-  links?: { yandex: string; spotify: string; youtube: string };
+  links?: OfficialLinks;
+  /** Та же запись в других источниках: плеер переключится на них, если поток не заиграет */
+  alternates?: Track[];
   likedAt?: number;
 }
 

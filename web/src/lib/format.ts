@@ -5,7 +5,7 @@ export function formatTime(sec: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export function plural(n: number, one: string, few: string, many: string) {
+function plural(n: number, one: string, few: string, many: string) {
   const m10 = n % 10;
   const m100 = n % 100;
   if (m10 === 1 && m100 !== 11) return one;

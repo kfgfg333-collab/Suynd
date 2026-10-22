@@ -1,21 +1,36 @@
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import fs from "node:fs";
 import { db, schema } from "../db/index.js";
 import { UpstreamError } from "../http.js";
 import { deezer, deezerGenreToAudius } from "../providers/deezer.js";
-import { getTracks, isValidTrackId, resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
+import { importAudioBuffer } from "../bot.js";
+import { FULL_SOURCES, isConfirmedFull, isPreviewOnlyId, onlyFull } from "../services/fullOnly.js";
+import { fetchAudioFromUrl, IMPORT_LIMIT, looksLikeAudio, verifyAudio } from "../services/importAudio.js";
+import { isPrivateHost } from "./media.js";
+import { getTracks, isValidTrackId, resolveTrack, SOURCE_BY_PREFIX, splitId, upsertTracks } from "../services/tracks.js";
 import type { Track } from "../types.js";
 
 const DAY = 24 * 60 * 60 * 1000;
-export const HISTORY_DAYS = 3;
+const FULL_UNAVAILABLE_MSG = "Полная версия недоступна — превью в Suynd не сохраняются";
+const HISTORY_DAYS = 3;
 const MIN_PLAY_GAP_MS = 60 * 1000;
 
 /** Клиент присылает трек целиком (он уже у него есть) — сохраняем его, иначе ищем по id */
 export async function ensureTrack(body: unknown, id?: string): Promise<Track> {
   const t = (body as { track?: Track } | undefined)?.track;
   if (t && isValidTrackId(t.id) && (!id || t.id === id) && typeof t.title === "string" && typeof t.artist === "string") {
-    if (!t.id.startsWith("lib:")) upsertTracks([{ ...t, full: t.source === "audius", downloadable: t.source === "audius" && t.downloadable }]);
+    // Сервер уже знает этот трек (из поиска) — его данные надёжнее присланных
+    const [known] = getTracks([t.id]);
+    if (known) return known;
+    // Флаги «полный»/«скачиваемый» и источник сервер определяет сам, по префиксу id, а не верит клиенту
+    const source = SOURCE_BY_PREFIX[splitId(t.id)[0]];
+    if (source && source !== "library") {
+      const full = FULL_SOURCES.has(source);
+      // Право скачать ещё раз проверяется у источника при самом скачивании
+      const downloadable = full && Boolean(t.downloadable);
+      upsertTracks([{ ...t, source, duration: Math.max(0, Math.floor(Number(t.duration) || 0)), full, downloadable }]);
+    }
     const [stored] = getTracks([t.id]);
     if (stored) return stored;
   }
@@ -23,6 +38,14 @@ export async function ensureTrack(body: unknown, id?: string): Promise<Track> {
   if (!isValidTrackId(trackId)) throw new UpstreamError("Некорректный трек", 400);
   const track = await resolveTrack(trackId);
   if (!track) throw new UpstreamError("Трек не найден", 404);
+  return track;
+}
+
+/** То же, но только для подтверждённых полных треков: превью не попадёт в избранное, историю и плейлисты */
+async function ensureFullTrack(body: unknown, id?: string): Promise<Track> {
+  if (id && isPreviewOnlyId(id)) throw new UpstreamError(FULL_UNAVAILABLE_MSG, 422);
+  const track = await ensureTrack(body, id);
+  if (!isConfirmedFull(track)) throw new UpstreamError(FULL_UNAVAILABLE_MSG, 422);
   return track;
 }
 
@@ -43,15 +66,15 @@ export async function libraryRoutes(app: FastifyInstance) {
   app.get("/api/favorites", async () => {
     const rows = db.select().from(schema.favorites).orderBy(desc(schema.favorites.createdAt)).all();
     const likedAt = new Map(rows.map((r) => [r.trackId, r.createdAt]));
-    return { items: getTracks(rows.map((r) => r.trackId)).map((t) => ({ ...t, likedAt: likedAt.get(t.id) })) };
+    return { items: onlyFull(getTracks(rows.map((r) => r.trackId))).map((t) => ({ ...t, likedAt: likedAt.get(t.id) })) };
   });
 
   app.get("/api/favorites/ids", async () => ({
-    ids: db.select({ id: schema.favorites.trackId }).from(schema.favorites).all().map((r) => r.id),
+    ids: onlyFull(getTracks(db.select({ id: schema.favorites.trackId }).from(schema.favorites).all().map((r) => r.id))).map((t) => t.id),
   }));
 
   app.put("/api/favorites/:id", async (req) => {
-    const track = await ensureTrack(req.body, (req.params as { id: string }).id);
+    const track = await ensureFullTrack(req.body, (req.params as { id: string }).id);
     db.insert(schema.favorites).values({ trackId: track.id, createdAt: Date.now() }).onConflictDoNothing().run();
     void enrichGenre(track);
     return { ok: true };
@@ -64,7 +87,7 @@ export async function libraryRoutes(app: FastifyInstance) {
 
   /* ───────── История ───────── */
   app.post("/api/plays", async (req) => {
-    const track = await ensureTrack(req.body);
+    const track = await ensureFullTrack(req.body);
     const now = Date.now();
     const last = db.select().from(schema.plays).orderBy(desc(schema.plays.playedAt)).limit(1).get();
     if (last && last.trackId === track.id && now - last.playedAt < MIN_PLAY_GAP_MS) return { ok: true, skipped: true };
@@ -76,7 +99,7 @@ export async function libraryRoutes(app: FastifyInstance) {
   app.get("/api/history", async () => {
     const since = Date.now() - HISTORY_DAYS * DAY;
     const rows = db.select().from(schema.plays).where(gte(schema.plays.playedAt, since)).orderBy(desc(schema.plays.playedAt)).all();
-    const tracks = new Map(getTracks([...new Set(rows.map((r) => r.trackId))]).map((t) => [t.id, t]));
+    const tracks = new Map(onlyFull(getTracks([...new Set(rows.map((r) => r.trackId))])).map((t) => [t.id, t]));
     return {
       items: rows.filter((r) => tracks.has(r.trackId)).map((r) => ({ playId: r.id, playedAt: r.playedAt, track: tracks.get(r.trackId)! })),
     };
@@ -90,7 +113,7 @@ export async function libraryRoutes(app: FastifyInstance) {
       .orderBy(desc(sql`max(${schema.plays.playedAt})`))
       .limit(12)
       .all();
-    return { items: getTracks(rows.map((r) => r.trackId)) };
+    return { items: onlyFull(getTracks(rows.map((r) => r.trackId))) };
   });
 
   app.delete("/api/history", async () => {
@@ -109,6 +132,8 @@ export async function libraryRoutes(app: FastifyInstance) {
       arr.push(e.trackId);
       byList.set(e.playlistId, arr);
     }
+    const fullIds = new Set(onlyFull(getTracks([...new Set(entries.map((e) => e.trackId))])).map((t) => t.id));
+    for (const [id, ids] of byList) byList.set(id, ids.filter((x) => fullIds.has(x)));
     for (const ids of byList.values()) ids.slice(0, 4).forEach((id) => coverIds.add(id));
     const covers = new Map(getTracks([...coverIds]).map((t) => [t.id, t.cover]));
     return {
@@ -137,7 +162,7 @@ export async function libraryRoutes(app: FastifyInstance) {
       .orderBy(schema.playlistTracks.position)
       .all()
       .map((r) => r.trackId);
-    return { playlist, tracks: getTracks(ids) };
+    return { playlist, tracks: onlyFull(getTracks(ids)) };
   });
 
   app.patch("/api/playlists/:id", async (req) => {
@@ -158,7 +183,7 @@ export async function libraryRoutes(app: FastifyInstance) {
   app.post("/api/playlists/:id/tracks", async (req) => {
     const id = Number((req.params as { id: string }).id);
     if (!db.select().from(schema.playlists).where(eq(schema.playlists.id, id)).get()) throw new UpstreamError("Плейлист не найден", 404);
-    const track = await ensureTrack(req.body);
+    const track = await ensureFullTrack(req.body);
     const max = db
       .select({ m: sql<number>`coalesce(max(${schema.playlistTracks.position}), -1)` })
       .from(schema.playlistTracks)
@@ -200,7 +225,32 @@ export async function libraryRoutes(app: FastifyInstance) {
   /* ───────── Мои файлы (загруженные в бота) ───────── */
   app.get("/api/library", async () => {
     const rows = db.select().from(schema.libraryFiles).orderBy(desc(schema.libraryFiles.createdAt)).all();
-    return { items: getTracks(rows.map((r) => `lib:${r.id}`)) };
+    return { items: onlyFull(getTracks(rows.map((r) => `lib:${r.id}`))) };
+  });
+
+  /* Импорт: файл с телефона (тело запроса = сам файл) */
+  app.addContentTypeParser(["application/octet-stream", "audio/*"], { parseAs: "buffer", bodyLimit: IMPORT_LIMIT + 1024 }, (_req, body, done) =>
+    done(null, body),
+  );
+
+  app.post("/api/library/upload", async (req) => {
+    const buffer = req.body as Buffer;
+    if (!Buffer.isBuffer(buffer)) throw new UpstreamError("Пришлите файл", 400);
+    const fileName = decodeURIComponent(String(req.headers["x-file-name"] ?? "track.mp3")).slice(0, 200);
+    const mime = String(req.headers["x-file-type"] ?? req.headers["content-type"] ?? "");
+    if (!looksLikeAudio(fileName, mime)) throw new UpstreamError("Это не аудиофайл", 415);
+    const check = await verifyAudio(buffer, mime.startsWith("audio/") ? mime : undefined);
+    const { track, existed } = await importAudioBuffer(buffer, fileName, mime);
+    return { track, existed, check };
+  });
+
+  /* Импорт по прямой ссылке на аудиофайл */
+  app.post("/api/library/import-url", async (req) => {
+    const url = String((req.body as { url?: string })?.url ?? "").trim();
+    const file = await fetchAudioFromUrl(url, isPrivateHost);
+    const check = await verifyAudio(file.buffer, file.mime.startsWith("audio/") ? file.mime : undefined);
+    const { track, existed } = await importAudioBuffer(file.buffer, file.fileName, file.mime);
+    return { track, existed, check };
   });
 
   app.delete("/api/library/:id", async (req) => {
@@ -236,11 +286,4 @@ export async function libraryRoutes(app: FastifyInstance) {
     };
   });
 
-  /** Пачка статусов для экрана трека */
-  app.post("/api/tracks/state", async (req) => {
-    const ids = ((req.body as { ids?: string[] })?.ids ?? []).filter(isValidTrackId).slice(0, 200);
-    if (!ids.length) return { liked: [] };
-    const liked = db.select().from(schema.favorites).where(inArray(schema.favorites.trackId, ids)).all();
-    return { liked: liked.map((r) => r.trackId) };
-  });
 }

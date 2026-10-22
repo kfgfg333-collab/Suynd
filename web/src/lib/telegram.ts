@@ -75,14 +75,3 @@ export function confirmDialog(message: string): Promise<boolean> {
 export function telegramUserName(): string | null {
   return tg?.initDataUnsafe?.user?.first_name ?? null;
 }
-
-/** Отступы под шапку Telegram в полноэкранном режиме */
-export function safeTop(): number {
-  const top = (tg?.contentSafeAreaInset?.top ?? 0) + (tg?.safeAreaInset?.top ?? 0);
-  return top;
-}
-
-export function onTelegramEvent(event: string, cb: () => void) {
-  tg?.onEvent?.(event, cb);
-  return () => tg?.offEvent?.(event, cb);
-}

@@ -1,7 +1,8 @@
 import { create } from "zustand";
-import { api, mediaUrl, streamUrl } from "../lib/api";
+import { api, enc, mediaUrl, SOURCE_LABELS, streamUrl } from "../lib/api";
 import { getOffline } from "../lib/offline";
 import { shuffleArray } from "../lib/format";
+import { FULL_UNAVAILABLE, isFullLengthAudio, isFullTrack, onlyFull, planPlayback } from "../lib/fullOnly";
 import { haptic } from "../lib/telegram";
 import type { Track, WaveEnergy, WaveMode } from "../lib/types";
 import { useLibrary } from "./library";
@@ -53,6 +54,7 @@ interface PlayerState {
   setFullOpen: (open: boolean) => void;
   waveFeedback: (value: 1 | -1) => Promise<void>;
   blockArtist: (t: Track) => Promise<void>;
+  findFull: (t: Track) => Promise<void>;
 }
 
 let uidSeq = 0;
@@ -68,7 +70,7 @@ function loadWaveSettings(): { mode: WaveMode; energy: WaveEnergy } {
 }
 
 /* ───────── Аудио-движок ───────── */
-export const audio = new Audio();
+const audio = new Audio();
 audio.preload = "auto";
 (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
 const preloader = new Audio();
@@ -81,12 +83,47 @@ let lastTime = 0;
 let counted = false;
 let errorStreak = 0;
 let loadToken = 0;
+let retriedId: string | null = null;
+
+/** Почему сервер не отдал поток (источник не отвечает, файл удалён…): <audio> сам этого не сообщает */
+async function streamProblem(track: Track): Promise<{ message: string | null; code?: string }> {
+  try {
+    const res = await fetch(streamUrl(track), { headers: { range: "bytes=0-1" } });
+    if (res.ok) {
+      await res.body?.cancel();
+      return { message: null };
+    }
+    const data = await res.json().catch(() => ({}));
+    return { message: typeof data.message === "string" ? data.message : null, code: data.code };
+  } catch {
+    return { message: "нет соединения с сервером" };
+  }
+}
+
+/**
+ * Следующий запасной источник той же записи. Новый трек несёт только оставшиеся варианты,
+ * поэтому каждый источник пробуется один раз — без циклов.
+ */
+function nextAlternate(track: Track): Track | null {
+  const rest = (track.alternates ?? []).filter(isFullTrack);
+  const [alt, ...others] = rest;
+  return alt ? { ...alt, alternates: others } : null;
+}
+
+/** Подменить текущий трек в очереди запасным источником и включить его */
+function switchToAlternate(track: Track, alt: Track, why: string) {
+  const { queue, index } = usePlayer.getState();
+  usePlayer.setState({ queue: queue.map((q, i) => (i === index ? { ...q, track: alt } : q)) });
+  toast(`«${track.title}»: ${why}. Включаю ту же запись из источника «${SOURCE_LABELS[alt.source]}»`);
+  void loadTrack(alt, true);
+}
 
 async function loadTrack(track: Track, autoplay: boolean) {
   const token = ++loadToken;
   listened = 0;
   lastTime = 0;
   counted = false;
+  retriedId = null;
   if (blobUrl) {
     URL.revokeObjectURL(blobUrl);
     blobUrl = null;
@@ -98,7 +135,7 @@ async function loadTrack(track: Track, autoplay: boolean) {
     if (entry) src = blobUrl = URL.createObjectURL(entry.blob);
   }
   audio.src = src;
-  usePlayer.setState({ currentTime: 0, duration: track.full ? track.duration : Math.min(30, track.duration || 30), buffering: autoplay });
+  usePlayer.setState({ currentTime: 0, duration: track.duration, buffering: autoplay });
   updateMediaSession(track);
   if (autoplay) {
     audio.play().catch((e) => {
@@ -126,6 +163,20 @@ audio.addEventListener("playing", () => {
 });
 audio.addEventListener("durationchange", () => {
   if (Number.isFinite(audio.duration) && audio.duration > 0) usePlayer.setState({ duration: audio.duration });
+});
+// Последняя линия защиты: если источник прислал обрезок вместо песни — не играем его
+audio.addEventListener("loadedmetadata", () => {
+  const track = usePlayer.getState().current();
+  if (!track || !Number.isFinite(audio.duration)) return;
+  if (!isFullLengthAudio(track.duration, audio.duration)) {
+    audio.pause();
+    audio.removeAttribute("src");
+    usePlayer.setState({ isPlaying: false, buffering: false });
+    const alt = nextAlternate(track);
+    if (alt) return switchToAlternate(track, alt, "источник отдал фрагмент");
+    toast(`«${track.title}»: источник отдал фрагмент. ${FULL_UNAVAILABLE}`, "error");
+    setTimeout(() => usePlayer.getState().next(), 600);
+  }
 });
 audio.addEventListener("timeupdate", () => {
   const t = audio.currentTime;
@@ -159,14 +210,32 @@ audio.addEventListener("ended", () => {
 audio.addEventListener("error", () => {
   if (!audio.src) return;
   const track = usePlayer.getState().current();
-  errorStreak++;
   usePlayer.setState({ buffering: false, isPlaying: false });
-  if (errorStreak >= 3) {
-    toast("Не получается воспроизвести треки. Проверьте интернет.", "error");
+  if (!track) return;
+  // Прямая ссылка источника могла истечь посреди трека: сервер возьмёт свежую — один раз продолжаем с того же места
+  if (!blobUrl && retriedId !== track.id && lastTime > 1) {
+    retriedId = track.id;
+    const at = lastTime;
+    const token = loadToken;
+    audio.src = `${streamUrl(track)}&retry=${Date.now()}`;
+    audio.addEventListener("loadedmetadata", () => token === loadToken && (audio.currentTime = at), { once: true });
+    audio.play().catch(() => {});
     return;
   }
-  toast(track ? `«${track.title}» недоступен — включаю следующий` : "Трек недоступен", "error");
-  setTimeout(() => usePlayer.getState().next(), 900);
+  errorStreak++;
+  const token = loadToken;
+  void (async () => {
+    const { message: reason } = await streamProblem(track);
+    if (token !== loadToken) return;
+    const alt = nextAlternate(track);
+    if (alt) return switchToAlternate(track, alt, reason ?? "источник не отдал звук");
+    if (errorStreak >= 3) {
+      toast(reason ? `Не получается воспроизвести: ${reason}` : "Не получается воспроизвести треки. Проверьте интернет.", "error");
+      return;
+    }
+    toast(`«${track.title}»: ${reason ?? "трек недоступен"} — включаю следующий`, "error");
+    setTimeout(() => token === loadToken && usePlayer.getState().next(), 900);
+  })();
 });
 
 function updateMediaSession(track: Track) {
@@ -175,7 +244,7 @@ function updateMediaSession(track: Track) {
   navigator.mediaSession.metadata = new MediaMetadata({
     title: track.title,
     artist: track.artist,
-    album: track.album ?? (track.full ? "" : "Превью 30 с"),
+    album: track.album ?? "",
     artwork: cover ? [{ src: cover, sizes: "512x512", type: "image/jpeg" }] : [],
   });
 }
@@ -212,7 +281,9 @@ function fetchWave(): Promise<void> {
         body: { ...wave, exclude: queue.map((q) => q.track.id) },
       });
       const known = new Set(usePlayer.getState().queue.map((q) => q.track.id));
-      const fresh = items.filter((t) => !known.has(t.id)).map((t) => toItem(t));
+      const fresh = onlyFull(items)
+        .filter((t) => !known.has(t.id))
+        .map((t) => toItem(t));
       if (usePlayer.getState().context?.kind === "wave") usePlayer.setState({ queue: [...usePlayer.getState().queue, ...fresh] });
     } catch (e) {
       toast(`Волна: ${(e as Error).message}`, "error");
@@ -249,8 +320,17 @@ export const usePlayer = create<PlayerState>((set, get) => ({
 
   current: () => get().queue[get().index]?.track ?? null,
 
-  playList(tracks, start = 0, title = "") {
-    if (!tracks.length) return;
+  playList(allTracks, start = 0, title = "") {
+    if (!allTracks.length) return;
+    // Только полные треки: превью не попадают в очередь, а на «не полный» трек плеер не стартует
+    const plan = planPlayback(allTracks, start);
+    if (!plan) {
+      haptic.error();
+      toast(FULL_UNAVAILABLE, "error");
+      return;
+    }
+    const tracks = plan.queue;
+    start = plan.index;
     haptic.impact("light");
     const cur = get().current();
     // Нажали на уже играющий трек — просто пауза/плей
@@ -269,8 +349,9 @@ export const usePlayer = create<PlayerState>((set, get) => ({
     void loadTrack(items[index].track, true);
   },
 
-  playShuffled(tracks, title = "") {
-    if (!tracks.length) return;
+  playShuffled(allTracks, title = "") {
+    const tracks = onlyFull(allTracks);
+    if (!tracks.length) return toast(FULL_UNAVAILABLE, "error");
     const shuffled = shuffleArray(tracks);
     set({ shuffle: false });
     get().playList(shuffled, 0, title);
@@ -336,6 +417,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   },
 
   addToQueue(t) {
+    if (!isFullTrack(t)) return toast(FULL_UNAVAILABLE, "error");
     const { queue, index } = get();
     if (index < 0) {
       get().playList([t], 0);
@@ -353,6 +435,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
   },
 
   playNext(t) {
+    if (!isFullTrack(t)) return toast(FULL_UNAVAILABLE, "error");
     const { queue, index } = get();
     if (index < 0) {
       get().playList([t], 0);
@@ -445,6 +528,36 @@ export const usePlayer = create<PlayerState>((set, get) => ({
         set({ queue: get().queue.slice(0, get().index + 3) });
         ensureWaveAhead();
       }
+    }
+  },
+
+  /** Ищет полную версию превью в легальных полных источниках и подменяет её в очереди */
+  async findFull(track) {
+    toast(`Ищу полную версию «${track.title}»…`);
+    try {
+      const r = await api<{ track: Track | null; checked: { source: string; title: string; ok: boolean }[] }>(`/api/tracks/${enc(track.id)}/full`);
+      if (!r.track) {
+        haptic.error();
+        toast(
+          r.checked.length
+            ? `${FULL_UNAVAILABLE}: похожие записи нашлись, но ни одна не прошла проверку аудио`
+            : `${FULL_UNAVAILABLE} в подключённых источниках (Audius, Jamendo, Internet Archive, Openverse, ваши файлы)`,
+          "error",
+        );
+        return;
+      }
+      const found = r.track;
+      if (!isFullTrack(found)) {
+        toast(FULL_UNAVAILABLE, "error");
+        return;
+      }
+      const { index } = get();
+      if (index < 0 || !get().isPlaying) get().playList([found], 0, `${found.artist} — ${found.title}`);
+      else get().playNext(found);
+      haptic.success();
+      toast(`Полная версия: ${SOURCE_LABELS[found.source]}`, "success");
+    } catch (e) {
+      toast((e as Error).message, "error");
     }
   },
 
