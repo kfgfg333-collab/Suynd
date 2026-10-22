@@ -90,14 +90,15 @@ function libraryCandidates(target: Track): Track[] {
 
 const safe = <T>(p: Promise<T>, fallback: T) => p.catch(() => fallback);
 
-export type SearchProvider = (query: string) => Promise<Track[]>;
+/** firstQueryOnly — дорогой источник (процесс yt-dlp) спрашиваем один раз, а не на каждый вариант запроса */
+export type SearchProvider = ((query: string) => Promise<Track[]>) & { firstQueryOnly?: boolean };
 
 export const defaultProviders: SearchProvider[] = [
   (q) => audius.searchTracks(q, 15),
   (q) => jamendo.searchTracks(q, 10),
   (q) => archive.searchTracks(q, 10),
   (q) => openverse.searchTracks(q, 10),
-  (q) => ytdlp.searchTracks(q, 8),
+  Object.assign((q: string) => ytdlp.searchTracks(q, 8), { firstQueryOnly: true }),
 ];
 
 interface FindOptions {
@@ -113,7 +114,7 @@ type FindResult = { track: Track | null; checked: { source: string; title: strin
 
 /**
  * Ищет полную версию трека во всех подключённых полных источниках:
- * ваша библиотека → Audius → Jamendo → Internet Archive (CC / public domain) → YouTube через yt-dlp.
+ * ваша библиотека → Audius → Jamendo → Internet Archive / Openverse (CC) → YouTube через yt-dlp.
  * Источник, у которого только превью, просто не участвует — поиск идёт дальше.
  */
 export async function findFullVersion(target: Track, opts: FindOptions): Promise<FindResult> {
@@ -126,7 +127,7 @@ export async function findFullVersion(target: Track, opts: FindOptions): Promise
   const primary = splitArtists(target.artist)[0] ?? target.artist;
   const title = normalize(target.title);
   const queries = [...new Set([`${primary} ${title}`, `${target.artist} ${target.title}`, title])].map((q) => q.slice(0, 100));
-  const results = await Promise.all(queries.flatMap((q) => providers.map((p) => safe(p(q), []))));
+  const results = await Promise.all(queries.flatMap((q, qi) => providers.filter((p) => qi === 0 || !p.firstQueryOnly).map((p) => safe(p(q), []))));
   const seen = new Set<string>();
   const remote = results.flat().filter((t) => !seen.has(t.id) && seen.add(t.id));
 

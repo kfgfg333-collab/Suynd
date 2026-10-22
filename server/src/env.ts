@@ -12,6 +12,10 @@ function required(name: string): string {
   return value;
 }
 
+function clamp(n: number, min: number, max: number, fallback: number) {
+  return Number.isFinite(n) ? Math.max(min, Math.min(Math.floor(n), max)) : fallback;
+}
+
 const isProd = process.env.NODE_ENV === "production";
 
 export const env = {
@@ -29,6 +33,15 @@ export const env = {
   jamendoClientId: process.env.JAMENDO_CLIENT_ID?.trim() || "",
   // Кэш полных аудиофайлов на диске сервера (CC-источники и ваши файлы). 0 — выключить
   audioCacheMb: Number(process.env.AUDIO_CACHE_MB ?? 1024),
+  // Необязательно: YouTube через yt-dlp. Без бинарника остальные источники работают как обычно
+  ytDlp: {
+    enabled: process.env.YT_DLP_ENABLED !== "false",
+    path: process.env.YT_DLP_PATH?.trim() || "yt-dlp",
+    timeoutMs: clamp(Number(process.env.YT_DLP_TIMEOUT_MS ?? 18_000), 5_000, 60_000, 18_000),
+    maxConcurrency: clamp(Number(process.env.YT_DLP_MAX_CONCURRENCY ?? 2), 1, 8, 2),
+    // Файл cookies в формате Netscape на диске сервера (своего аккаунта). Никогда не кладите его в репозиторий
+    cookiesFile: process.env.YT_DLP_COOKIES_FILE?.trim() || "",
+  },
 };
 
 if (!Number.isFinite(env.allowedUserId) || env.allowedUserId <= 0) {

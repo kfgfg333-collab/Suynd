@@ -4,7 +4,7 @@ import { deezer } from "../providers/deezer.js";
 import { archive } from "../providers/archive.js";
 import { jamendo } from "../providers/jamendo.js";
 import { openverse } from "../providers/openverse.js";
-import { ytdlp } from "../providers/ytdlp.js";
+import { ytdlp, YtDlpError } from "../providers/ytdlp.js";
 import { resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
 import { mapLimit, UpstreamError } from "../http.js";
 import { isCensoredTitle, onlyFull } from "../services/fullOnly.js";
@@ -53,6 +53,15 @@ async function audiusTwin(name: string) {
 
 const RESOLVE_IN_SEARCH = 3;
 
+function youtubeWarning(e: unknown): string {
+  if (e instanceof YtDlpError) {
+    if (e.reason === "not_installed") return "YouTube не подключён: на сервере не установлен yt-dlp. Остальные источники работают";
+    if (e.reason === "disabled") return "";
+    return `YouTube: ${e.message}`;
+  }
+  return "YouTube не ответил вовремя — показаны результаты других источников";
+}
+
 /** Каталог Deezer с вариантами транслитерации: «Милано Скам» находит «Scally Milano — Скам» */
 async function searchCatalog(query: string): Promise<Track[]> {
   const variants = queryVariants(query);
@@ -79,13 +88,19 @@ export async function catalogRoutes(app: FastifyInstance) {
 
     // Полные треки: Audius, Jamendo (если задан ключ) и Internet Archive (CC / public domain).
     // Deezer — только каталог: у него лишь превью, поэтому по его совпадениям ищем полные версии в других источниках.
+    const warnings: string[] = [];
     const [dz, au, jm, ia, ov, yt] = await Promise.all([
       searchCatalog(query),
       settled(audius.searchTracks(query, 15), []),
       settled(jamendo.searchTracks(query, 8), []),
       settled(withTimeout(archive.searchTracks(query, 6), 6000), []),
       settled(withTimeout(openverse.searchTracks(query, 8), 8000), []),
-      settled(withTimeout(ytdlp.searchTracks(query, 10), 22000), []),
+      // YouTube необязателен: без yt-dlp или при его ошибке остальные источники работают, а клиент видит причину
+      withTimeout(ytdlp.searchTracks(query, 10), 22000).catch((e) => {
+        const w = youtubeWarning(e);
+        if (w) warnings.push(w);
+        return [] as Track[];
+      }),
     ]);
     let full = interleave(interleave(au, interleave(interleave(jm, ov, 2), ia, 2), 3), yt, 4);
 
@@ -101,6 +116,7 @@ export async function catalogRoutes(app: FastifyInstance) {
     const unavailable = dz.filter((c) => !full.some((f) => scoreCandidate(c, f) > 0));
     return {
       items: full,
+      ...(warnings.length ? { warnings } : {}),
       // Совпадения из каталога, для которых полной версии нет: только текст, без воспроизведения
       unavailable: unavailable.slice(0, 8).map((c) => ({ id: c.id, title: c.title, artist: c.artist, explicit: c.explicit ?? false })),
     };

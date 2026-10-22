@@ -5,10 +5,10 @@ import { db, schema } from "../db/index.js";
 import { UpstreamError } from "../http.js";
 import { deezer, deezerGenreToAudius } from "../providers/deezer.js";
 import { importAudioBuffer } from "../bot.js";
-import { isConfirmedFull, isPreviewOnlyId, onlyFull } from "../services/fullOnly.js";
+import { FULL_SOURCES, isConfirmedFull, isPreviewOnlyId, onlyFull } from "../services/fullOnly.js";
 import { fetchAudioFromUrl, IMPORT_LIMIT, looksLikeAudio, verifyAudio } from "../services/importAudio.js";
 import { isPrivateHost } from "./media.js";
-import { getTracks, isValidTrackId, resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
+import { getTracks, isValidTrackId, resolveTrack, SOURCE_BY_PREFIX, splitId, upsertTracks } from "../services/tracks.js";
 import type { Track } from "../types.js";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -20,10 +20,16 @@ const MIN_PLAY_GAP_MS = 60 * 1000;
 export async function ensureTrack(body: unknown, id?: string): Promise<Track> {
   const t = (body as { track?: Track } | undefined)?.track;
   if (t && isValidTrackId(t.id) && (!id || t.id === id) && typeof t.title === "string" && typeof t.artist === "string") {
-    // Флаги «полный»/«скачиваемый» сервер определяет сам, по источнику, а не верит клиенту
-    const fullSources = ["audius", "archive", "jamendo"];
-    if (!t.id.startsWith("lib:")) {
-      upsertTracks([{ ...t, full: fullSources.includes(t.source), downloadable: fullSources.includes(t.source) && Boolean(t.downloadable) }]);
+    // Сервер уже знает этот трек (из поиска) — его данные надёжнее присланных
+    const [known] = getTracks([t.id]);
+    if (known) return known;
+    // Флаги «полный»/«скачиваемый» и источник сервер определяет сам, по префиксу id, а не верит клиенту
+    const source = SOURCE_BY_PREFIX[splitId(t.id)[0]];
+    if (source && source !== "library") {
+      const full = FULL_SOURCES.has(source);
+      // YouTube: право скачать проверяется по лицензии при запросе, не по флагу клиента
+      const downloadable = full && source !== "ytdlp" && Boolean(t.downloadable);
+      upsertTracks([{ ...t, source, duration: Math.max(0, Math.floor(Number(t.duration) || 0)), full, downloadable }]);
     }
     const [stored] = getTracks([t.id]);
     if (stored) return stored;

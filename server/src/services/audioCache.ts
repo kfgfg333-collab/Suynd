@@ -85,6 +85,18 @@ export function fillCache(id: string, url: string, expectedSec: number, mime = "
   return job;
 }
 
+/** Расширение кэшированного файла по сохранённому типу (для имени при скачивании) */
+export function cachedExt(file: string): string {
+  let type = "audio/mpeg";
+  try {
+    type = fs.readFileSync(`${file}.type`, "utf8") || type;
+  } catch {
+    /* по умолчанию mp3 */
+  }
+  const map: Record<string, string> = { "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/ogg": ".ogg", "audio/flac": ".flac", "audio/wav": ".wav", "audio/webm": ".webm" };
+  return map[type] ?? ".mp3";
+}
+
 /** Отдать файл из кэша с поддержкой Range (перемотка) */
 export function serveCached(req: FastifyRequest, reply: FastifyReply, file: string, extraHeaders: Record<string, string> = {}) {
   const size = fs.statSync(file).size;

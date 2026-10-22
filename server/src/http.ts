@@ -3,7 +3,12 @@ const cache = new Map<string, { expires: number; value: unknown }>();
 const MAX_CACHE = 2000;
 
 export class UpstreamError extends Error {
-  constructor(message: string, public status = 502) {
+  constructor(
+    message: string,
+    public status = 502,
+    /** Машиночитаемая причина для клиента (например, ytdlp_not_installed) */
+    public code?: string,
+  ) {
     super(message);
   }
 }

@@ -6,6 +6,7 @@ import { archive } from "../providers/archive.js";
 import { itunes } from "../providers/itunes.js";
 import { jamendo } from "../providers/jamendo.js";
 import { externalLinks } from "../providers/links.js";
+import { ytdlp } from "../providers/ytdlp.js";
 import type { Source, Track } from "../types.js";
 
 type TrackRow = typeof schema.tracks.$inferSelect;
@@ -88,6 +89,7 @@ export async function resolveTrack(id: string): Promise<Track | null> {
   else if (prefix === "it") track = await itunes.track(raw);
   else if (prefix === "ia") track = await archive.track(raw);
   else if (prefix === "jm") track = await jamendo.track(raw);
+  else if (prefix === "yt") track = await ytdlp.track(raw);
   if (track) upsertTracks([track]);
   return track;
 }
@@ -97,8 +99,22 @@ export function splitId(id: string): [string, string] {
   return i === -1 ? ["", id] : [id.slice(0, i), id.slice(i + 1)];
 }
 
+/** Префикс id однозначно задаёт источник: разные источники не могут дать одинаковый id */
+export const SOURCE_BY_PREFIX: Record<string, Source> = {
+  dz: "deezer",
+  au: "audius",
+  lib: "library",
+  it: "itunes",
+  ia: "archive",
+  jm: "jamendo",
+  ov: "openverse",
+  yt: "ytdlp",
+};
+
 export function isValidTrackId(id: unknown): id is string {
-  // ia:… — base64url от «идентификатор/файл», поэтому длиннее
-  // ia:/ov: — base64url от «идентификатор/файл» или ссылки на файл, поэтому длиннее
-  return typeof id === "string" && (/^(dz|au|lib|it|jm):[A-Za-z0-9_-]{1,64}$/.test(id) || /^(ia|ov):[A-Za-z0-9_-]{4,400}$/.test(id));
+  // ia:/ov: — base64url от «идентификатор/файл» или ссылки на файл, поэтому длиннее; yt: — ровно 11 символов id видео YouTube
+  return (
+    typeof id === "string" &&
+    (/^(dz|au|lib|it|jm):[A-Za-z0-9_-]{1,64}$/.test(id) || /^(ia|ov):[A-Za-z0-9_-]{4,400}$/.test(id) || /^yt:[A-Za-z0-9_-]{11}$/.test(id))
+  );
 }

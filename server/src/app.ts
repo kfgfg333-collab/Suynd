@@ -32,9 +32,14 @@ export async function buildApp() {
 
   app.setErrorHandler((err, req, reply) => {
     const status = err instanceof UpstreamError ? err.status : (err as { statusCode?: number }).statusCode ?? 500;
-    if (status >= 500) req.log.error(err);
+    // Ожидаемые сбои источников (YouTube недоступен, CDN ответил ошибкой) — коротко, без стека; остальное — полностью
+    if (status >= 500) {
+      if (err instanceof UpstreamError) req.log.warn({ status, code: err.code }, err.message);
+      else req.log.error(err);
+    }
     reply.code(status).send({
       error: "error",
+      ...(err instanceof UpstreamError && err.code ? { code: err.code } : {}),
       message: status >= 500 && !(err instanceof UpstreamError) ? "Что-то пошло не так на сервере. Попробуйте ещё раз." : (err as Error).message,
     });
   });

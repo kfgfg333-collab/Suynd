@@ -10,7 +10,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/unit.test.ts test/no-previews.test.ts test/sources-extra.test.ts",
+    "test": "tsx --test test/unit.test.ts test/no-previews.test.ts test/sources-extra.test.ts test/ytdlp.test.ts test/ytdlp-missing.test.ts",
     "test:live": "tsx --test test/sources.live.test.ts test/full-sources.live.test.ts"
   },
   "dependencies": {
