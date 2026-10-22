@@ -13,22 +13,24 @@
        ▲                                 │  └─ SQLite (Drizzle)      │
        │ кнопка «Открыть»                └──────┬────────────────────┘
 ┌──────┴───────┐                                │ fetch
-│  Telegram    │                       Deezer API · iTunes · Audius API
+│  Telegram    │      Audius · Jamendo · Internet Archive · Openverse · Deezer (каталог)
 └──────────────┘                       Telegram Bot API (файлы)
 ```
 
 * **Вход:** Mini App отправляет `initData` → сервер проверяет HMAC‑SHA256 (ключ = HMAC("WebAppData", BOT_TOKEN)),
   срок `auth_date` (24 ч) и `user.id === ALLOWED_USER_ID` → выдаёт подписанный сессионный токен (7 дней).
   Токен идёт в заголовке `Authorization`, а для `<audio>`/картинок — в `?t=`.
-* **Единая модель трека** (`id` с префиксом источника): `dz:123` (Deezer, только каталог), `au:abc` (Audius, полный),
-  `ia:…`/`ov:…` (Internet Archive / Openverse, CC), `jm:123` (Jamendo), `yt:<id видео>` (YouTube через yt-dlp),
-  `lib:7` (мои файлы, полный). Ссылки на аудио всегда идут через бэкенд (`/api/stream/:id`), потому что превью Deezer
-  протухают, а ссылка на файл Telegram содержит токен бота.
-* **Скачивание** разрешено только для `lib:*`, CC-источников (`ia:*`, `ov:*`, `jm:*` с разрешением автора), `au:*` с
-  `is_downloadable && access.download && !is_download_gated` и `yt:*` с лицензией Creative Commons (проверяется через yt-dlp).
-* **YouTube (yt-dlp):** поиск `ytsearch` → треки `yt:*`; перед воспроизведением `--print` с форматом m4a даёт свежую ссылку
-  googlevideo, она кэшируется до `expire`; ответ 403/404/410 → одно повторное получение. Процессы: без оболочки, тайм-аут,
-  максимум 2 одновременно, очередь 8, вывод до 4 МБ.
+* **Единая модель трека** (`id` с префиксом источника): `dz:123` (Deezer, только каталог), `au:abc` (Audius),
+  `jm:123` (Jamendo), `ia:…`/`ov:…` (Internet Archive / Openverse, CC), `lib:7` (мои файлы). Префикс однозначно задаёт
+  источник, поэтому id разных источников не пересекаются. Аудио всегда идёт через бэкенд (`/api/stream/:id`, с Range),
+  потому что ссылка на файл Telegram содержит токен бота, а CDN источника может быть заблокирован у пользователя.
+* **Провайдеры** (`providers/index.ts`): единый интерфейс `{ source, prefix, enabled, timeoutMs, optional?, search, streamUrl }`.
+* **Поиск** (`services/search.ts` + сопоставление `services/match.ts`): каталог Deezer даёт эталон, источники опрашиваются
+  параллельно с тайм-аутами, сбойный источник пропускается 30 с; кандидаты сравниваются по названию, исполнителю,
+  длительности и версии, поток лучшего проверяется реальным запросом, дубли из других источников — `alternates`.
+  Результаты кэшируются (10 мин / 2 мин для пустых), одинаковые одновременные запросы склеиваются.
+* **Скачивание** разрешено только для `lib:*`, CC-источников (`ia:*`, `ov:*`, `jm:*` с разрешением автора) и `au:*` с
+  `is_downloadable && access.download && !is_download_gated`.
   Офлайн: файл качается через `/api/download/:id` и кладётся в IndexedDB (прогресс, размер, удаление).
 
 ## 2. Структура
@@ -41,8 +43,10 @@ server/
     db/schema.ts        таблицы Drizzle
     db/index.ts         подключение + создание таблиц
     auth.ts             проверка initData, сессионные токены
-    providers/          deezer.ts, itunes.ts, audius.ts, links.ts
-    services/           tracks.ts (кэш треков), wave.ts, radar.ts, history.ts
+    log.ts              JSON-логи без текста запросов и ключей
+    providers/          index.ts (реестр), audius, jamendo, archive, openverse, deezer (каталог), links (официальные ссылки)
+    services/           search.ts (агрегатор), match.ts (сопоставление), fullOnly.ts (правило «только полные»),
+                        tracks.ts (кэш треков), audioCache.ts, importAudio.ts, translit.ts, wave.ts, radar.ts
     routes/             auth, catalog, library, playlists, wave, media, radar
     bot.ts              grammY: /start, приём аудио, отправка файлов
     jobs.ts             node-cron: радар каждый час, чистка истории
