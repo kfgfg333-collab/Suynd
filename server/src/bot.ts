@@ -7,8 +7,12 @@ import { coversDir, db, schema } from "./db/index.js";
 import { eq } from "drizzle-orm";
 import { env } from "./env.js";
 import { runRadar, type Notifier } from "./services/radar.js";
-import { upsertTracks } from "./services/tracks.js";
+import { getTracks, upsertTracks } from "./services/tracks.js";
+import type { Track } from "./types.js";
 import { TG_DOWNLOAD_LIMIT, telegramFileUrl } from "./telegramFiles.js";
+import { UpstreamError } from "./http.js";
+import { MIN_FULL_SEC } from "./services/fullOnly.js";
+import { SHORT_FRAGMENT } from "./services/importAudio.js";
 
 let bot: Bot | null = null;
 
@@ -37,14 +41,17 @@ async function downloadTelegramFile(fileId: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
-async function saveAudio(ctx: Context, file: Audio | Document) {
-  const isAudio = "duration" in file;
+/**
+ * Сохраняет аудио из Telegram в «Мои файлы»: теги, обложка, длительность.
+ * buffer — уже скачанный файл (при импорте из приложения), иначе скачаем сами.
+ */
+export async function storeLibraryFile(file: Audio | Document, buffer?: Buffer): Promise<{ track: Track; existed: boolean }> {
   const exists = db.select().from(schema.libraryFiles).where(eq(schema.libraryFiles.fileUniqueId, file.file_unique_id)).get();
   if (exists) {
-    await ctx.reply("Этот файл уже есть в вашей библиотеке 👌", { reply_markup: openButton() });
-    return;
+    const [track] = getTracks([`lib:${exists.id}`]);
+    if (track) return { track, existed: true };
   }
-
+  const isAudio = "duration" in file;
   const guess = splitFileName(file.file_name);
   let title = (isAudio && file.title) || guess.title || "Без названия";
   let artist = (isAudio && file.performer) || guess.artist || "Неизвестный артист";
@@ -54,10 +61,10 @@ async function saveAudio(ctx: Context, file: Audio | Document) {
   let cover: { data: Uint8Array; ext: string } | null = null;
 
   // Теги и обложка из самого файла (Bot API отдаёт файлы до 20 МБ)
-  if ((file.file_size ?? 0) <= TG_DOWNLOAD_LIMIT) {
+  if (buffer || (file.file_size ?? 0) <= TG_DOWNLOAD_LIMIT) {
     try {
-      const buffer = await downloadTelegramFile(file.file_id);
-      const meta = await parseBuffer(buffer, { mimeType: file.mime_type, size: buffer.length });
+      const data = buffer ?? (await downloadTelegramFile(file.file_id));
+      const meta = await parseBuffer(data, { mimeType: file.mime_type, size: data.length });
       title = meta.common.title || title;
       artist = meta.common.artist || meta.common.albumartist || artist;
       album = meta.common.album ?? null;
@@ -78,6 +85,10 @@ async function saveAudio(ctx: Context, file: Audio | Document) {
     }
   }
 
+  // Короткие обрезки (превью, нарезки) в библиотеку не попадают
+  if (!duration) throw new UpstreamError("Не удалось определить длительность файла — без неё не могу подтвердить, что это полный трек", 422);
+  if (duration < MIN_FULL_SEC) throw new UpstreamError(SHORT_FRAGMENT, 422);
+
   const row = db
     .insert(schema.libraryFiles)
     .values({
@@ -85,7 +96,7 @@ async function saveAudio(ctx: Context, file: Audio | Document) {
       fileUniqueId: file.file_unique_id,
       fileName: file.file_name ?? null,
       mime: file.mime_type ?? null,
-      size: file.file_size ?? null,
+      size: file.file_size ?? buffer?.length ?? null,
       createdAt: Date.now(),
     })
     .returning()
@@ -99,29 +110,56 @@ async function saveAudio(ctx: Context, file: Audio | Document) {
     coverUrl = `/api/cover/lib/${row.id}`;
   }
 
-  upsertTracks([
-    {
-      id: `lib:${row.id}`,
-      source: "library",
-      title,
-      artist,
-      artistId: null,
-      album,
-      albumId: null,
-      cover: coverUrl,
-      duration,
-      full: true,
-      downloadable: true,
-      genre,
-    },
-  ]);
+  const track: Track = {
+    id: `lib:${row.id}`,
+    source: "library",
+    title,
+    artist,
+    artistId: null,
+    album,
+    albumId: null,
+    cover: coverUrl,
+    duration,
+    full: true,
+    downloadable: true,
+    genre,
+  };
+  upsertTracks([track]);
+  return { track, existed: false };
+}
 
+async function saveAudio(ctx: Context, file: Audio | Document) {
+  let result: Awaited<ReturnType<typeof storeLibraryFile>>;
+  try {
+    result = await storeLibraryFile(file);
+  } catch (err) {
+    await ctx.reply(`⚠️ ${(err as Error).message}`);
+    return;
+  }
+  const { track, existed } = result;
+  if (existed) {
+    await ctx.reply("Этот файл уже есть в вашей библиотеке 👌", { reply_markup: openButton() });
+    return;
+  }
   const tooBig = (file.file_size ?? 0) > TG_DOWNLOAD_LIMIT;
   await ctx.reply(
-    `✅ Добавлено в «Мои файлы»:\n<b>${escapeHtml(artist)} — ${escapeHtml(title)}</b>` +
+    `✅ Добавлено в «Мои файлы»:\n<b>${escapeHtml(track.artist)} — ${escapeHtml(track.title)}</b>` +
       (tooBig ? "\n\n⚠️ Файл больше 20 МБ: Telegram не даёт ботам скачивать такие файлы, поэтому в плеере он не заиграет. Его можно только переслать в чат." : ""),
     { parse_mode: "HTML", reply_markup: openButton() },
   );
+}
+
+/** Импорт файла из приложения: кладём его в чат с ботом (так он хранится в Telegram) и в библиотеку */
+export async function importAudioBuffer(buffer: Buffer, fileName: string, mime: string) {
+  const asAudio = /^audio\/(mpeg|mp3|mp4|x-m4a|aac)$/.test(mime) || /\.(mp3|m4a)$/i.test(fileName);
+  const input = new InputFile(buffer, fileName);
+  const caption = "📥 Импортировано из приложения";
+  const msg = asAudio
+    ? await getBot().api.sendAudio(env.allowedUserId, input, { caption, disable_notification: true })
+    : await getBot().api.sendDocument(env.allowedUserId, input, { caption, disable_notification: true });
+  const file = ("audio" in msg && msg.audio) || ("document" in msg && msg.document);
+  if (!file) throw new Error("Telegram не принял файл");
+  return storeLibraryFile(file, buffer);
 }
 
 export function escapeHtml(s: string) {

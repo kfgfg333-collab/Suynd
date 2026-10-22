@@ -2,7 +2,7 @@ import { sqliteTable, text, integer, primaryKey } from "drizzle-orm/sqlite-core"
 
 export const tracks = sqliteTable("tracks", {
   id: text("id").primaryKey(),
-  source: text("source", { enum: ["deezer", "audius", "library", "itunes"] }).notNull(),
+  source: text("source", { enum: ["deezer", "audius", "library", "itunes", "archive", "jamendo", "openverse"] }).notNull(),
   title: text("title").notNull(),
   artist: text("artist").notNull(),
   artistId: text("artist_id"),

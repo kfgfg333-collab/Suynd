@@ -22,7 +22,7 @@ function mapTrack(t: any): Track {
   };
 }
 
-/** Запасной поиск, если Deezer недоступен */
+/** Каталог-метаданные (только превью у источника — в плеер не попадает) */
 export const itunes = {
   async searchTracks(q: string, limit = 25) {
     const r = await getJson<{ results: any[] }>(
@@ -30,10 +30,6 @@ export const itunes = {
       { ttlSec: 600 },
     );
     return r.results.filter((t) => t.previewUrl).map(mapTrack);
-  },
-  async previewUrl(id: string): Promise<string | null> {
-    const r = await getJson<{ results: any[] }>(`https://itunes.apple.com/lookup?id=${id}`, { ttlSec: 3600 });
-    return r.results[0]?.previewUrl ?? null;
   },
   async track(id: string) {
     const r = await getJson<{ results: any[] }>(`https://itunes.apple.com/lookup?id=${id}`, { ttlSec: 3600 });

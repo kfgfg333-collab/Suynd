@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { api, enc } from "../lib/api";
+import { api, enc, SOURCE_LABELS } from "../lib/api";
 import { confirmDialog, haptic, openLink } from "../lib/telegram";
 import type { Playlist, Track } from "../lib/types";
 import { useLibrary } from "../store/library";
@@ -77,7 +77,10 @@ function MainActions({ track, ctx, onPlaylists }: { track: Track; ctx: { playlis
         <div className="min-w-0 flex-1">
           <div className="truncate font-bold">{track.title}</div>
           <div className="truncate text-sm text-muted">{track.artist}</div>
-          <SourceBadge track={track} className="mt-1" />
+          <div className="mt-1 flex items-center gap-1.5">
+            <SourceBadge track={track} />
+            <span className="text-[11px] text-muted">{SOURCE_LABELS[track.source]}</span>
+          </div>
         </div>
       </div>
       <div className="h-px bg-line" />

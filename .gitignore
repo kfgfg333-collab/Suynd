@@ -8,3 +8,4 @@ server/data/
 .DS_Store
 .vercel
 *.tsbuildinfo
+server/data-test/
