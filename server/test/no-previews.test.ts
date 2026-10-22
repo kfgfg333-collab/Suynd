@@ -18,8 +18,7 @@ const { issueSession } = await import("../src/auth.js");
 const { db, schema } = await import("../src/db/index.js");
 const { upsertTracks } = await import("../src/services/tracks.js");
 const { onlyFull, isConfirmedFull, isFullLengthAudio } = await import("../src/services/fullOnly.js");
-const { findFullVersion } = await import("../src/services/fullVersion.js");
-const { dedupeFull } = await import("../src/routes/catalog.js");
+const { createSearch } = await import("../src/services/search.js");
 const { verifyAudio } = await import("../src/services/importAudio.js");
 type Track = import("../src/types.js").Track;
 
@@ -60,49 +59,48 @@ test("1. 30-секундное превью не проходит как пол�
   assert.deepEqual(onlyFull([preview, shortAudius, fullAudius, fullArchive]).map((t) => t.id), ["au:full1", "ia:QUJDRC9maWxlLm1wMw"]);
 });
 
-test("1b. Дубликаты из разных источников объединяются, остаётся одна полная версия", () => {
-  const out = dedupeFull([fullArchive, fullAudius, preview]);
-  assert.deepEqual(out.map((t) => t.id), ["au:full1"]);
+type Provider = import("../src/providers/index.js").MusicProvider;
+const prov = (source: Track["source"], search: () => Promise<Track[]>): Provider => ({
+  source,
+  prefix: source,
+  label: source,
+  enabled: () => true,
+  timeoutMs: 1000,
+  search,
+  streamUrl: async () => null,
+});
+const finder = (providers: Provider[], probe: (url: string) => Promise<boolean>) =>
+  createSearch({ providers, catalog: async () => [], library: () => [], streamUrlOf: async (t) => `https://example.test/${t.id}.mp3`, probe, persist: () => {} });
+
+test("1b. Дубликаты из разных источников склеиваются: одна полная версия, остальные — запасные источники", async () => {
+  const r = await finder([prov("audius", async () => [fullAudius, preview]), prov("archive", async () => [fullArchive])], async () => true).findFullVersion(deezerFullLen);
+  assert.equal(r.track?.id, "au:full1");
+  assert.deepEqual(r.track?.alternates?.map((t) => t.id), ["ia:QUJDRC9maWxlLm1wMw"]);
 });
 
 test("2. Если первый источник даёт только превью, поиск идёт дальше и находит полную версию", async () => {
   const calls: string[] = [];
-  const result = await findFullVersion(deezerFullLen, {
-    providers: [
-      async () => (calls.push("preview-source"), [preview, shortAudius]),
-      async () => (calls.push("full-source"), [fullAudius]),
-    ],
-    library: () => [],
-    streamUrlOf: async () => "https://example.test/audio.mp3",
-    probe: async () => true,
-  });
+  const result = await finder(
+    [prov("deezer", async () => (calls.push("preview-source"), [preview, shortAudius])), prov("audius", async () => (calls.push("full-source"), [fullAudius]))],
+    async () => true,
+  ).findFullVersion(deezerFullLen);
   assert.ok(calls.includes("preview-source") && calls.includes("full-source"));
   assert.equal(result.track?.id, "au:full1");
 });
 
 test("2b. Найденная ссылка не считается доказательством: недоступный поток отклоняется", async () => {
-  const result = await findFullVersion(deezerFullLen, {
-    providers: [async () => [fullAudius]],
-    library: () => [],
-    streamUrlOf: async () => "https://example.test/dead.mp3",
-    probe: async () => false,
-  });
+  const result = await finder([prov("audius", async () => [fullAudius])], async () => false).findFullVersion(deezerFullLen);
   assert.equal(result.track, null);
   assert.equal(result.checked[0]?.ok, false);
 });
 
 test("2c. Если полной версии нигде нет — результат пустой, превью не подставляется", async () => {
-  const result = await findFullVersion(deezerFullLen, {
-    providers: [async () => [preview, shortAudius]],
-    library: () => [],
-    streamUrlOf: async () => "https://example.test/a.mp3",
-    probe: async () => true,
-  });
+  const result = await finder([prov("audius", async () => [preview, shortAudius])], async () => true).findFullVersion(deezerFullLen);
   assert.equal(result.track, null);
 });
 
 test("3. Плеер не получает поток для превью: /api/stream отвечает «полная версия недоступна»", async () => {
-  for (const id of ["dz:3135556", "it:1440857781"]) {
+  for (const id of ["dz:3135556"]) {
     const res = await app.inject({ method: "GET", url: `/api/stream/${id}`, headers: auth });
     assert.equal(res.statusCode, 410, id);
     assert.match(res.json().message, /Полная версия недоступна/);

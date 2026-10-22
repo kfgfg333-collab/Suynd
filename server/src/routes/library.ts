@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import fs from "node:fs";
 import { db, schema } from "../db/index.js";
@@ -13,7 +13,7 @@ import type { Track } from "../types.js";
 
 const DAY = 24 * 60 * 60 * 1000;
 const FULL_UNAVAILABLE_MSG = "Полная версия недоступна — превью в Suynd не сохраняются";
-export const HISTORY_DAYS = 3;
+const HISTORY_DAYS = 3;
 const MIN_PLAY_GAP_MS = 60 * 1000;
 
 /** Клиент присылает трек целиком (он уже у него есть) — сохраняем его, иначе ищем по id */
@@ -27,8 +27,8 @@ export async function ensureTrack(body: unknown, id?: string): Promise<Track> {
     const source = SOURCE_BY_PREFIX[splitId(t.id)[0]];
     if (source && source !== "library") {
       const full = FULL_SOURCES.has(source);
-      // YouTube: право скачать проверяется по лицензии при запросе, не по флагу клиента
-      const downloadable = full && source !== "ytdlp" && Boolean(t.downloadable);
+      // Право скачать ещё раз проверяется у источника при самом скачивании
+      const downloadable = full && Boolean(t.downloadable);
       upsertTracks([{ ...t, source, duration: Math.max(0, Math.floor(Number(t.duration) || 0)), full, downloadable }]);
     }
     const [stored] = getTracks([t.id]);
@@ -42,7 +42,7 @@ export async function ensureTrack(body: unknown, id?: string): Promise<Track> {
 }
 
 /** То же, но только для подтверждённых полных треков: превью не попадёт в избранное, историю и плейлисты */
-export async function ensureFullTrack(body: unknown, id?: string): Promise<Track> {
+async function ensureFullTrack(body: unknown, id?: string): Promise<Track> {
   if (id && isPreviewOnlyId(id)) throw new UpstreamError(FULL_UNAVAILABLE_MSG, 422);
   const track = await ensureTrack(body, id);
   if (!isConfirmedFull(track)) throw new UpstreamError(FULL_UNAVAILABLE_MSG, 422);
@@ -286,11 +286,4 @@ export async function libraryRoutes(app: FastifyInstance) {
     };
   });
 
-  /** Пачка статусов для экрана трека */
-  app.post("/api/tracks/state", async (req) => {
-    const ids = ((req.body as { ids?: string[] })?.ids ?? []).filter(isValidTrackId).slice(0, 200);
-    if (!ids.length) return { liked: [] };
-    const liked = db.select().from(schema.favorites).where(inArray(schema.favorites.trackId, ids)).all();
-    return { liked: liked.map((r) => r.trackId) };
-  });
 }

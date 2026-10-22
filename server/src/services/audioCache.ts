@@ -121,9 +121,3 @@ export function serveCached(req: FastifyRequest, reply: FastifyReply, file: stri
   reply.header("content-length", String(size));
   return reply.send(fs.createReadStream(file) as Readable);
 }
-
-export function cacheStats() {
-  const files = fs.readdirSync(CACHE_DIR).filter((f) => f.endsWith(".audio"));
-  const bytes = files.reduce((s, f) => s + fs.statSync(path.join(CACHE_DIR, f)).size, 0);
-  return { files: files.length, bytes, maxBytes: MAX_BYTES };
-}

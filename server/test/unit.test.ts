@@ -8,7 +8,7 @@ process.env.DATA_DIR = process.env.TEST_DATA_DIR ?? "./data-test";
 process.env.BOT_DISABLED = "true";
 
 const { validateInitData, issueSession, verifySession } = await import("../src/auth.js");
-const { scoreCandidate, similarity, normalize } = await import("../src/services/fullVersion.js");
+const { scoreCandidate, similarity, normalize } = await import("../src/services/match.js");
 const { preferExplicit } = await import("../src/providers/deezer.js");
 const { encodeArchiveId, decodeArchiveId, parseLength } = await import("../src/providers/archive.js");
 const { isPrivateHost } = await import("../src/routes/media.js");
@@ -113,7 +113,7 @@ test("проверка аудио: мусор и HTML отклоняются", a
 });
 
 test("сопоставление: совпадение с одним из соавторов", async () => {
-  const { splitArtists } = await import("../src/services/fullVersion.js");
+  const { splitArtists } = await import("../src/services/match.js");
   assert.deepEqual(splitArtists("Dr. Andrew Weil & Joshua Leeds"), ["Dr. Andrew Weil", "Joshua Leeds"]);
   const target = { title: "Song", artist: "Alpha & Beta feat. Gamma", duration: 180 };
   assert.ok(scoreCandidate(target, { title: "Song", artist: "Beta", duration: 182, full: true, source: "audius" as const }) > 0);

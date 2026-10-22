@@ -1,7 +1,14 @@
-export type Source = "deezer" | "audius" | "library" | "itunes" | "archive" | "jamendo" | "openverse" | "ytdlp";
+export type Source = "deezer" | "audius" | "library" | "archive" | "jamendo" | "openverse";
+
+/** Официальные страницы трека или поиска в стриминговых сервисах (только ссылки, без аудио) */
+export interface OfficialLinks {
+  deezer?: string;
+  spotify: string;
+  yandex: string;
+}
 
 export interface Track {
-  id: string; // dz:123 | au:abc | lib:7
+  id: string; // dz:123 | au:abc | jm:1 | ia:… | ov:… | lib:7
   source: Source;
   title: string;
   artist: string;
@@ -17,7 +24,9 @@ export interface Track {
   mood?: string | null;
   explicit?: boolean;
   releaseDate?: string | null;
-  links?: { yandex: string; spotify: string; youtube: string };
+  links?: OfficialLinks;
+  /** Та же запись в других источниках — плеер переключится на них, если этот поток не заиграет */
+  alternates?: Track[];
 }
 
 export interface Artist {

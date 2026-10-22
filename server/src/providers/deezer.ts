@@ -1,6 +1,6 @@
 import { getJson, UpstreamError } from "../http.js";
 import type { Album, Artist, Track } from "../types.js";
-import { externalLinks } from "./links.js";
+import { officialLinks } from "./links.js";
 
 const BASE = "https://api.deezer.com";
 
@@ -17,7 +17,7 @@ async function dz<T = DzObj>(path: string, ttlSec = 600): Promise<T> {
   return data as T;
 }
 
-export function mapTrack(t: DzObj, album?: DzObj): Track {
+function mapTrack(t: DzObj, album?: DzObj): Track {
   const alb = t.album ?? album;
   const artist = t.artist?.name ?? "Неизвестный артист";
   return {
@@ -34,11 +34,11 @@ export function mapTrack(t: DzObj, album?: DzObj): Track {
     downloadable: false,
     bpm: t.bpm || null,
     explicit: Boolean(t.explicit_lyrics),
-    links: externalLinks(artist, t.title_short || t.title),
+    links: officialLinks(artist, t.title_short || t.title, t.id),
   };
 }
 
-export function mapArtist(a: DzObj): Artist {
+function mapArtist(a: DzObj): Artist {
   return {
     id: `dz:${a.id}`,
     source: "deezer",
@@ -48,7 +48,7 @@ export function mapArtist(a: DzObj): Artist {
   };
 }
 
-export function mapAlbum(a: DzObj, artist?: DzObj): Album {
+function mapAlbum(a: DzObj, artist?: DzObj): Album {
   const art = a.artist ?? artist;
   return {
     id: `dz:${a.id}`,

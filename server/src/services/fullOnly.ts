@@ -2,11 +2,10 @@ import type { Source, Track } from "../types.js";
 
 /*
  * Единое правило Suynd: играем только подтверждённые полные треки.
- * Deezer и iTunes отдают лишь 30-секундные фрагменты — их записи служат каталогом
+ * Deezer отдаёт лишь 30-секундные фрагменты — их записи служат каталогом
  * (метаданные, обложки, поиск полной версии), но никогда не воспроизводятся.
  */
-export const FULL_SOURCES: ReadonlySet<Source> = new Set<Source>(["audius", "archive", "jamendo", "openverse", "library", "ytdlp"]);
-export const PREVIEW_ONLY_SOURCES: ReadonlySet<Source> = new Set<Source>(["deezer", "itunes"]);
+export const FULL_SOURCES: ReadonlySet<Source> = new Set<Source>(["audius", "archive", "jamendo", "openverse", "library"]);
 
 /** Короче — считаем фрагментом, даже если источник называет это треком */
 export const MIN_FULL_SEC = 45;
@@ -20,7 +19,7 @@ export function onlyFull<T extends Pick<Track, "source" | "full" | "duration">>(
 }
 
 export function isPreviewOnlyId(id: string): boolean {
-  return id.startsWith("dz:") || id.startsWith("it:");
+  return id.startsWith("dz:");
 }
 
 /** Реальная длительность звука похожа на полный трек (а не на обрезок) */

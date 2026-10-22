@@ -1,8 +1,8 @@
 import { getJson, UpstreamError } from "../http.js";
 import type { Album, Artist, Track } from "../types.js";
 
-export const AUDIUS_BASE = "https://api.audius.co/v1";
-export const AUDIUS_APP = "suynd";
+const AUDIUS_BASE = "https://api.audius.co/v1";
+const AUDIUS_APP = "suynd";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type AuObj = any;
@@ -32,7 +32,7 @@ export function isAudiusDownloadable(t: AuObj): boolean {
 const playable = (t: AuObj) =>
   t && t.is_streamable !== false && !t.is_stream_gated && !t.is_delete && t.is_available !== false && !t.user?.is_deactivated;
 
-export function mapTrack(t: AuObj): Track {
+function mapTrack(t: AuObj): Track {
   return {
     id: `au:${t.id}`,
     source: "audius",
@@ -52,7 +52,7 @@ export function mapTrack(t: AuObj): Track {
   };
 }
 
-export function mapArtist(u: AuObj): Artist {
+function mapArtist(u: AuObj): Artist {
   return {
     id: `au:${u.id}`,
     source: "audius",
@@ -62,7 +62,7 @@ export function mapArtist(u: AuObj): Artist {
   };
 }
 
-export function mapAlbum(p: AuObj): Album {
+function mapAlbum(p: AuObj): Album {
   return {
     id: `au:${p.id}`,
     source: "audius",

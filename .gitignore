@@ -9,7 +9,3 @@ server/data/
 .vercel
 *.tsbuildinfo
 server/data-test/
-
-# Cookies YouTube — личный секрет, только на диске сервера
-*cookies*.txt
-cookies.json

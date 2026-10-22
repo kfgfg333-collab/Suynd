@@ -11,7 +11,7 @@ const { archive } = await import("../src/providers/archive.js");
 const { audius } = await import("../src/providers/audius.js");
 const { deezer } = await import("../src/providers/deezer.js");
 const { jamendo } = await import("../src/providers/jamendo.js");
-const { probeAudio } = await import("../src/services/fullVersion.js");
+const { probeAudio } = await import("../src/services/search.js");
 const { splitId } = await import("../src/services/tracks.js");
 
 test("Deezer: только каталог — его треки никогда не помечены как полные", async () => {

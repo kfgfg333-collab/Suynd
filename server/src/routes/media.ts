@@ -5,16 +5,15 @@ import { Readable } from "node:stream";
 import { sendTrackToChat } from "../bot.js";
 import { db, schema } from "../db/index.js";
 import { UpstreamError } from "../http.js";
-import { audius, isAudiusDownloadable } from "../providers/audius.js";
 import { archive } from "../providers/archive.js";
+import { audius, isAudiusDownloadable } from "../providers/audius.js";
+import { providers, streamSourceUrl } from "../providers/index.js";
 import { jamendo } from "../providers/jamendo.js";
 import { openverseUrl } from "../providers/openverse.js";
-import { type ResolvedAudio, ytdlp } from "../providers/ytdlp.js";
-import { cachedExt, cachedPath, cacheStats, fillCache, isCacheable, serveCached } from "../services/audioCache.js";
-import { findFullVersion } from "../services/fullVersion.js";
-import { isConfirmedFull, isPreviewOnlyId, MIN_FULL_SEC } from "../services/fullOnly.js";
-import type { Track } from "../types.js";
-import { getTracks, resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
+import { cachedExt, cachedPath, fillCache, isCacheable, serveCached } from "../services/audioCache.js";
+import { isConfirmedFull, isPreviewOnlyId } from "../services/fullOnly.js";
+import { search } from "../services/search.js";
+import { getTracks, resolveTrack, splitId } from "../services/tracks.js";
 import { TG_DOWNLOAD_LIMIT, telegramFileUrl } from "../telegramFiles.js";
 
 function libraryRow(rawId: string) {
@@ -27,12 +26,17 @@ function libraryRow(rawId: string) {
 function openUpstream(req: FastifyRequest, url: string, headers: Record<string, string> = {}) {
   const h: Record<string, string> = { ...headers };
   if (req.headers.range) h.range = req.headers.range;
-  return fetch(url, { headers: h, redirect: "follow", signal: AbortSignal.timeout(120_000) });
+  return fetch(url, { headers: h, redirect: "follow", signal: AbortSignal.timeout(120_000) }).catch(() => {
+    throw new UpstreamError("Источник не отвечает. Попробуйте ещё раз", 502, "source_unreachable");
+  });
 }
 
 /** Отдаём ответ источника клиенту: статус, тип, длина и диапазон сохраняются */
 function pipeUpstream(reply: FastifyReply, upstream: Response, extraHeaders: Record<string, string> = {}) {
-  if (!upstream.ok && upstream.status !== 206) throw new UpstreamError(`Источник вернул ${upstream.status}`, 502);
+  if (!upstream.ok && upstream.status !== 206) {
+    void upstream.body?.cancel();
+    throw new UpstreamError(`Источник не отдал аудио (HTTP ${upstream.status})`, 502, "source_error");
+  }
   reply.code(upstream.status);
   for (const h of ["content-type", "content-length", "content-range", "accept-ranges"]) {
     const v = upstream.headers.get(h);
@@ -45,42 +49,8 @@ function pipeUpstream(reply: FastifyReply, upstream: Response, extraHeaders: Rec
 }
 
 /** Проксируем аудио с поддержкой Range (перемотка в <audio>) */
-async function proxyAudio(req: FastifyRequest, reply: FastifyReply, url: string, extraHeaders: Record<string, string> = {}, fetchHeaders: Record<string, string> = {}) {
-  return pipeUpstream(reply, await openUpstream(req, url, fetchHeaders), extraHeaders);
-}
-
-/**
- * YouTube: ссылка googlevideo живёт несколько часов. Если источник ответил 403/404/410 —
- * она истекла или отозвана: берём свежую через yt-dlp и повторяем запрос один раз.
- */
-async function openYoutube(req: FastifyRequest, raw: string): Promise<{ upstream: Response; audio: ResolvedAudio }> {
-  let audio = await ytdlp.resolve(raw);
-  // Сетевой сбой до медиасервера — временная ошибка, а не «видео недоступно»
-  const open = (a: ResolvedAudio) =>
-    openUpstream(req, a.url, a.headers).catch(() => {
-      throw ytdlp.markFailed(raw, "network");
-    });
-  let upstream = await open(audio);
-  if ([403, 404, 410].includes(upstream.status)) {
-    // Ссылка могла истечь или быть отозвана: одна попытка со свежей
-    await upstream.body?.cancel();
-    ytdlp.invalidate(raw);
-    audio = await ytdlp.resolve(raw, { force: true });
-    upstream = await open(audio);
-  }
-  if (!upstream.ok && upstream.status !== 206) {
-    await upstream.body?.cancel();
-    // Неудачу запоминаем: обновление страницы и перемотка не будут запускать yt-dlp снова
-    throw ytdlp.markFailed(raw, upstream.status === 403 ? "forbidden" : upstream.status >= 500 ? "network" : "unavailable");
-  }
-  // Лицензия становится известна только при полном извлечении — запоминаем, что ролик можно скачать
-  if (audio.creativeCommons) markDownloadable(`yt:${raw}`);
-  return { upstream, audio };
-}
-
-function markDownloadable(id: string) {
-  const [track] = getTracks([id]);
-  if (track && !track.downloadable) upsertTracks([{ ...track, downloadable: true }]);
+async function proxyAudio(req: FastifyRequest, reply: FastifyReply, url: string, extraHeaders: Record<string, string> = {}) {
+  return pipeUpstream(reply, await openUpstream(req, url), extraHeaders);
 }
 
 const EXT_BY_MIME: Record<string, string> = {
@@ -99,14 +69,11 @@ const EXT_BY_MIME: Record<string, string> = {
 };
 
 /** Расширение файла по фактическому типу ответа, а не «всегда .mp3» */
-export function extForMime(mime: string | null | undefined, fallback = ".mp3"): string {
+function extForMime(mime: string | null | undefined, fallback = ".mp3"): string {
   return EXT_BY_MIME[(mime ?? "").split(";")[0].trim().toLowerCase()] ?? fallback;
 }
 
 const attachment = (name: string) => `attachment; filename*=UTF-8''${encodeURIComponent(name)}`;
-
-export const YT_DOWNLOAD_FORBIDDEN =
-  "Скачивание с YouTube доступно только для роликов под лицензией Creative Commons. У этого видео такая лицензия не указана — его можно только слушать";
 
 /** Не даём ходить через /api/img во внутреннюю сеть сервера */
 export function isPrivateHost(host: string): boolean {
@@ -123,57 +90,34 @@ function safeFileName(s: string) {
 }
 
 /** Прямая ссылка на полный файл, только если источник разрешает скачивание */
-async function downloadableUrl(prefix: string, raw: string): Promise<{ url: string; headers?: Record<string, string> }> {
+async function downloadableUrl(prefix: string, raw: string): Promise<string> {
   if (prefix === "au") {
     if (!isAudiusDownloadable(await audius.rawTrack(raw))) throw new UpstreamError("Автор не разрешил скачивание этого трека", 403);
     // mp3-поток: компактный и точно играет в браузере
-    return { url: await audius.streamUrl(raw) };
+    return audius.streamUrl(raw);
   }
   if (prefix === "jm") {
     const t = await jamendo.raw(raw);
     if (!t?.audiodownload_allowed || !t.audiodownload) throw new UpstreamError("Автор не разрешил скачивание этого трека", 403);
-    return { url: t.audiodownload };
+    return t.audiodownload;
   }
   if (prefix === "ia") {
     // Только CC / public domain — лицензия разрешает копирование
     const track = await archive.track(raw);
     const url = archive.fileUrl(raw);
     if (!track || !url) throw new UpstreamError("Файл не найден в Internet Archive", 404);
-    return { url };
+    return url;
   }
   if (prefix === "ov") {
     // CC-лицензия Openverse разрешает копирование; ссылка проверяется по белому списку хостов
     const url = openverseUrl(raw);
     if (!url) throw new UpstreamError("Файл не найден", 404);
-    return { url };
-  }
-  if (prefix === "yt") {
-    // Публичность ролика не даёт права на копию: скачиваем только при лицензии Creative Commons
-    const audio = await ytdlp.resolve(raw);
-    if (!audio.creativeCommons) throw new UpstreamError(YT_DOWNLOAD_FORBIDDEN, 403, "ytdlp_download_forbidden");
-    markDownloadable(`yt:${raw}`);
-    return { url: audio.url, headers: audio.headers };
+    return url;
   }
   throw new UpstreamError("Скачивание недоступно для этого трека", 403);
 }
 
-export const FULL_UNAVAILABLE = "Полная версия недоступна";
-
-export const fullStreamUrlOf = (t: Track) => {
-  const [p, r] = splitId(t.id);
-  return streamSourceUrl(p, r);
-};
-
-/** Ссылка, по которой сервер берёт аудио для плеера (клиент всегда ходит через наш сервер) */
-export async function streamSourceUrl(prefix: string, raw: string): Promise<string | null> {
-  // Deezer и iTunes отдают только 30-секундные фрагменты — их не воспроизводим вообще
-  if (prefix === "au") return audius.streamUrl(raw);
-  if (prefix === "jm") return (await jamendo.raw(raw))?.audio ?? null;
-  if (prefix === "ia") return archive.fileUrl(raw);
-  if (prefix === "ov") return openverseUrl(raw);
-  if (prefix === "yt") return ytdlp.streamUrl(raw);
-  return null;
-}
+const FULL_UNAVAILABLE = "Полная версия недоступна";
 
 export async function mediaRoutes(app: FastifyInstance) {
   /*
@@ -188,17 +132,6 @@ export async function mediaRoutes(app: FastifyInstance) {
     const cached = cachedPath(id);
     if (cached) return serveCached(req, reply, cached);
 
-    if (prefix === "yt") {
-      const [track] = getTracks([id]);
-      const { upstream, audio } = await openYoutube(req, raw);
-      // Ролик заметно короче, чем было заявлено, — это не та полная запись: не выдаём её за песню
-      if (track && track.duration >= MIN_FULL_SEC && audio.duration < track.duration * 0.8) {
-        await upstream.body?.cancel();
-        throw new UpstreamError(FULL_UNAVAILABLE, 422, "not_full");
-      }
-      return pipeUpstream(reply, upstream, upstream.headers.get("content-type")?.startsWith("audio/") ? {} : { "content-type": audio.mime });
-    }
-
     let url: string | null;
     let mime: string | undefined;
     if (prefix === "lib") {
@@ -207,7 +140,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       url = await telegramFileUrl(row.fileId);
       mime = row.mime ?? undefined;
     } else {
-      url = await streamSourceUrl(prefix, raw);
+      url = await streamSourceUrl(id);
     }
     if (!url) throw new UpstreamError("Аудио недоступно", 404);
     // Параллельно кладём полный файл в кэш (только для источников, где копирование разрешено)
@@ -217,8 +150,6 @@ export async function mediaRoutes(app: FastifyInstance) {
     }
     return proxyAudio(req, reply, url, mime ? { "content-type": mime } : {});
   });
-
-  app.get("/api/cache", async () => cacheStats());
 
   /** Скачивание для офлайна — мои файлы и источники, где скачивание разрешено */
   app.get("/api/download/:id", async (req, reply) => {
@@ -242,8 +173,7 @@ export async function mediaRoutes(app: FastifyInstance) {
     // Скачиваем только подтверждённые полные треки — фрагмент под видом песни не сохраняем
     const full = await resolveTrack(id).catch(() => null);
     if (!full || !isConfirmedFull(full)) throw new UpstreamError(`${FULL_UNAVAILABLE} — скачивать нечего`, 403);
-    const source = await downloadableUrl(prefix, raw);
-    const upstream = await openUpstream(req, source.url, source.headers);
+    const upstream = await openUpstream(req, await downloadableUrl(prefix, raw));
     return pipeUpstream(reply, upstream, { "content-disposition": attachment(name + extForMime(upstream.headers.get("content-type"))) });
   });
 
@@ -259,8 +189,7 @@ export async function mediaRoutes(app: FastifyInstance) {
       return { ok: true };
     }
     if (!isConfirmedFull(track)) throw new UpstreamError(`${FULL_UNAVAILABLE} — отправлять нечего`, 403);
-    const source = await downloadableUrl(prefix, raw);
-    const res = await fetch(source.url, { headers: source.headers, redirect: "follow", signal: AbortSignal.timeout(120_000) });
+    const res = await fetch(await downloadableUrl(prefix, raw), { redirect: "follow", signal: AbortSignal.timeout(120_000) });
     if (!res.ok || !res.body) throw new UpstreamError("Источник не отдал файл", 502);
     const size = Number(res.headers.get("content-length") ?? 0);
     if (size > 50 * 1024 * 1024) {
@@ -278,47 +207,17 @@ export async function mediaRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  /** Можно ли скачать трек. Для YouTube лицензия известна только после полного извлечения */
-  app.get("/api/tracks/:id/download-check", async (req) => {
-    const id = (req.params as { id: string }).id;
-    const [prefix, raw] = splitId(id);
-    if (isPreviewOnlyId(id)) return { downloadable: false, reason: FULL_UNAVAILABLE };
-    if (prefix === "yt") {
-      try {
-        const audio = await ytdlp.resolve(raw);
-        if (audio.creativeCommons) markDownloadable(id);
-        return audio.creativeCommons ? { downloadable: true, license: audio.license } : { downloadable: false, reason: YT_DOWNLOAD_FORBIDDEN };
-      } catch (e) {
-        return { downloadable: false, reason: (e as Error).message };
-      }
-    }
-    const track = await resolveTrack(id).catch(() => null);
-    if (!track || !isConfirmedFull(track)) return { downloadable: false, reason: FULL_UNAVAILABLE };
-    return track.downloadable || prefix === "lib" ? { downloadable: true } : { downloadable: false, reason: "Источник не разрешает скачивание этого трека" };
-  });
-
-  /** Диагностика источников: установлен ли yt-dlp и работает ли он */
-  app.get("/api/sources/status", async () => ({
-    ytdlp: await ytdlp.status(true),
-    jamendo: { available: jamendo.enabled() },
+  /** Какие источники подключены (без ключей и внутренних адресов) */
+  app.get("/api/sources", async () => ({
+    items: providers.map((p) => ({ source: p.source, label: p.label, enabled: p.enabled() })),
   }));
 
-  /**
-   * Та же запись в другом разрешённом источнике — когда текущий (обычно YouTube) не отдаёт звук.
-   * YouTube здесь не предлагается: найденная версия проверяется реальным запросом к аудио.
-   */
-  app.get("/api/tracks/:id/alternative", async (req) => {
-    const track = await resolveTrack((req.params as { id: string }).id).catch(() => null);
-    if (!track) throw new UpstreamError("Трек не найден", 404);
-    return findFullVersion(track, { streamUrlOf: fullStreamUrlOf, excludeSources: ["ytdlp"] });
-  });
-
-  /** Поиск полной версии трека (для превью Deezer/iTunes) в легальных полных источниках */
+  /** Полная версия трека каталога Deezer в разрешённых источниках (с проверкой потока) */
   app.get("/api/tracks/:id/full", async (req) => {
     const track = await resolveTrack((req.params as { id: string }).id);
     if (!track) throw new UpstreamError("Трек не найден", 404);
     if (isConfirmedFull(track)) return { track, checked: [] };
-    return findFullVersion(track, { streamUrlOf: fullStreamUrlOf });
+    return search.findFullVersion(track);
   });
 
   /** Обложки через сервер — на случай, если CDN источника заблокирован у пользователя */

@@ -4,7 +4,7 @@ import { audius, moodEnergy } from "../providers/audius.js";
 import { deezer } from "../providers/deezer.js";
 import type { Track } from "../types.js";
 import { isConfirmedFull } from "./fullOnly.js";
-import { normalize } from "./fullVersion.js";
+import { normalize } from "./match.js";
 import { getTracks, splitId, upsertTracks } from "./tracks.js";
 
 export type WaveMode = "familiar" | "mix" | "new";

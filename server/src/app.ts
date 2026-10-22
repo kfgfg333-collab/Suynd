@@ -11,10 +11,16 @@ import { mediaRoutes } from "./routes/media.js";
 import { radarRoutes } from "./routes/radar.js";
 import { waveRoutes } from "./routes/wave.js";
 
+export const redactUrl = (url: string) => url.replace(/([?&](?:t|token)=)[^&]*/gi, "$1***");
+
 /** Сборка приложения без запуска: используется сервером и тестами (app.inject) */
 export async function buildApp() {
   const app = Fastify({
-    logger: { level: env.isProd ? "info" : "warn" },
+    logger: {
+      level: env.isProd ? "info" : "warn",
+      // В логи не попадают токен сессии из ?t= (у <audio> и картинок) и IP-адрес пользователя
+      serializers: { req: (req) => ({ method: req.method, url: redactUrl(req.url) }) },
+    },
     trustProxy: true,
     bodyLimit: 1024 * 1024,
     maxParamLength: 512, // id треков Internet Archive длинные (base64 от «item/файл»)
@@ -32,7 +38,7 @@ export async function buildApp() {
 
   app.setErrorHandler((err, req, reply) => {
     const status = err instanceof UpstreamError ? err.status : (err as { statusCode?: number }).statusCode ?? 500;
-    // Ожидаемые сбои источников (YouTube недоступен, CDN ответил ошибкой) — коротко, без стека; остальное — полностью
+    // Ожидаемые сбои источников (источник не отвечает, CDN ответил ошибкой) — коротко, без стека; остальное — полностью
     if (status >= 500) {
       if (err instanceof UpstreamError) req.log.warn({ status, code: err.code }, err.message);
       else req.log.error(err);

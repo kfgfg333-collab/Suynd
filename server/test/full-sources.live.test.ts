@@ -19,14 +19,30 @@ type Track = import("../src/types.js").Track;
 const app = await buildApp();
 const auth = { authorization: `Bearer ${issueSession(42).token}` };
 
-test("поиск возвращает только подтверждённые полные треки", async () => {
-  const res = await app.inject({ method: "GET", url: "/api/search?q=lofi", headers: auth });
-  const items = res.json().items as Track[];
-  assert.ok(items.length > 0);
-  for (const t of items) {
+test("поиск: один лучший проверенный трек из нескольких источников, и он реально играет", async () => {
+  const res = (await app.inject({ method: "GET", url: `/api/search?q=${encodeURIComponent("Kevin MacLeod Sneaky Snitch")}`, headers: auth })).json();
+  const best = res.best as Track;
+  assert.ok(best, "лучший результат найден");
+  assert.equal(res.mode, "track");
+  assert.match(best.artist, /kevin macleod/i);
+  assert.match(best.title, /sneaky snitch/i);
+  for (const t of [best, ...(best.alternates ?? []), ...(res.more as Track[])]) {
     assert.ok(FULL_SOURCES.has(t.source), `${t.id} из ${t.source}`);
     assert.ok(t.full && t.duration >= 45, `${t.id}: ${t.duration} с`);
   }
+  // Найдено в нескольких источниках: лучший + запасные
+  assert.ok(new Set([best, ...(best.alternates ?? [])].map((t) => t.source)).size >= 2, "склеены записи из разных источников");
+  const audio = await app.inject({ method: "GET", url: `/api/stream/${best.id}`, headers: { ...auth, range: "bytes=0-65535" } });
+  assert.ok([200, 206].includes(audio.statusCode));
+  assert.match(String(audio.headers["content-type"]), /^audio\//);
+});
+
+test("поиск: трека нет в разрешённых источниках — честный ответ и официальные ссылки, без подмены", async () => {
+  const res = (await app.inject({ method: "GET", url: `/api/search?q=${encodeURIComponent("Scally Milano — Скам")}`, headers: auth })).json();
+  assert.equal(res.best, null);
+  assert.match(res.catalog.artist, /scally milano/i);
+  assert.match(res.links.deezer, /^https:\/\/www\.deezer\.com\/track\/\d+$/);
+  assert.match(res.links.spotify, /^https:\/\/open\.spotify\.com\//);
 });
 
 test("полный трек Audius воспроизводится: поток отдаёт MP3, длительность совпадает", async () => {
@@ -41,8 +57,11 @@ test("полный трек Audius воспроизводится: поток о
 });
 
 test("полный трек Internet Archive скачивается целиком", async () => {
-  const items = (await app.inject({ method: "GET", url: "/api/search?q=satie", headers: auth })).json().items as Track[];
-  const t = items.find((x) => x.source === "archive" && x.downloadable && x.duration < 400);
+  const { archive } = await import("../src/providers/archive.js");
+  const { upsertTracks } = await import("../src/services/tracks.js");
+  const items = await archive.searchTracks("satie gymnopedie", 10);
+  upsertTracks(items);
+  const t = items.find((x) => x.downloadable && x.duration > 60 && x.duration < 400);
   assert.ok(t, "нет подходящего трека Internet Archive");
   const res = await app.inject({ method: "GET", url: `/api/download/${t!.id}`, headers: auth });
   assert.equal(res.statusCode, 200);
@@ -72,7 +91,7 @@ test("Openverse: полный CC-трек играет через сервер, 
 
 test("поиск по-русски: «Милано Скам» находит трек в каталоге, но не выдаёт превью", async () => {
   const res = (await app.inject({ method: "GET", url: `/api/search?q=${encodeURIComponent("Милано Скам")}`, headers: auth })).json();
-  const all = [...res.items, ...res.unavailable] as { title: string; artist: string }[];
-  assert.ok(all.some((x) => /scally milano/i.test(x.artist) && /скам/i.test(x.title)), "транслитерация не сработала");
-  for (const t of res.items as Track[]) assert.notEqual(t.source, "deezer");
+  assert.match(res.catalog?.artist ?? "", /scally milano/i, "транслитерация не сработала");
+  assert.match(res.catalog?.title ?? "", /скам/i);
+  if (res.best) assert.notEqual(res.best.source, "deezer");
 });

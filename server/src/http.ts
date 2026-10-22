@@ -6,7 +6,7 @@ export class UpstreamError extends Error {
   constructor(
     message: string,
     public status = 502,
-    /** Машиночитаемая причина для клиента (например, ytdlp_not_installed) */
+    /** Машиночитаемая причина для клиента (например, source_unreachable) */
     public code?: string,
   ) {
     super(message);

@@ -45,7 +45,7 @@ async function downloadTelegramFile(fileId: string): Promise<Buffer> {
  * Сохраняет аудио из Telegram в «Мои файлы»: теги, обложка, длительность.
  * buffer — уже скачанный файл (при импорте из приложения), иначе скачаем сами.
  */
-export async function storeLibraryFile(file: Audio | Document, buffer?: Buffer): Promise<{ track: Track; existed: boolean }> {
+async function storeLibraryFile(file: Audio | Document, buffer?: Buffer): Promise<{ track: Track; existed: boolean }> {
   const exists = db.select().from(schema.libraryFiles).where(eq(schema.libraryFiles.fileUniqueId, file.file_unique_id)).get();
   if (exists) {
     const [track] = getTracks([`lib:${exists.id}`]);
@@ -162,7 +162,7 @@ export async function importAudioBuffer(buffer: Buffer, fileName: string, mime: 
   return storeLibraryFile(file, buffer);
 }
 
-export function escapeHtml(s: string) {
+function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
