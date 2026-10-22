@@ -1,11 +1,11 @@
 /*
  * Правило Suynd на клиенте (дублирует серверное): в плеер, очередь, избранное и офлайн
- * попадают только подтверждённые полные треки. Превью Deezer/iTunes не играют никогда.
+ * попадают только подтверждённые полные треки. Превью Deezer не играют никогда.
  */
 import type { Source, Track } from "./types";
 
-export const FULL_SOURCES: ReadonlySet<Source> = new Set<Source>(["audius", "archive", "jamendo", "openverse", "library", "ytdlp"]);
-export const MIN_FULL_SEC = 45;
+const FULL_SOURCES: ReadonlySet<Source> = new Set<Source>(["audius", "archive", "jamendo", "openverse", "library"]);
+const MIN_FULL_SEC = 45;
 export const FULL_UNAVAILABLE = "Полная версия недоступна";
 
 export function isFullTrack(t: Pick<Track, "source" | "full" | "duration"> | null | undefined): boolean {

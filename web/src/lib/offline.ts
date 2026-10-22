@@ -63,7 +63,7 @@ export async function clearOffline() {
 
 /** Скачать трек с прогрессом и положить в IndexedDB */
 /** Реальная длительность скачанного файла (браузер читает заголовки аудио) */
-export function blobDuration(blob: Blob): Promise<number> {
+function blobDuration(blob: Blob): Promise<number> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(blob);
     const a = new Audio();

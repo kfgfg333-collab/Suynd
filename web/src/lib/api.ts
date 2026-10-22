@@ -1,16 +1,16 @@
 import { initData, isTelegram } from "./telegram";
 import type { Track } from "./types";
 
-export const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:3000").replace(/\/$/, "");
+const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:3000").replace(/\/$/, "");
 
 let token: string | null = null;
 let loginPromise: Promise<void> | null = null;
 
-export class ApiError extends Error {
+class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
-    /** Причина от сервера, например ytdlp_not_installed */
+    /** Причина от сервера, например source_unreachable */
     public code?: string,
   ) {
     super(message);
@@ -99,11 +99,9 @@ export const SOURCE_LABELS: Record<Track["source"], string> = {
   deezer: "Deezer",
   audius: "Audius",
   library: "Мои файлы",
-  itunes: "iTunes",
   archive: "Internet Archive · CC",
   jamendo: "Jamendo · CC",
   openverse: "Openverse · CC",
-  ytdlp: "YouTube · yt-dlp",
 };
 
 /** Загрузка файла на сервер с прогрессом (fetch не умеет прогресс отправки) */

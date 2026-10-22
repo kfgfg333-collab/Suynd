@@ -329,7 +329,7 @@ function BottomActions({ track, queueOpen, onQueue }: { track: Track; queueOpen:
   );
 }
 
-export function ProgressRing({ value, size = 22 }: { value: number; size?: number }) {
+function ProgressRing({ value, size = 22 }: { value: number; size?: number }) {
   const r = size / 2 - 2;
   const c = 2 * Math.PI * r;
   return (

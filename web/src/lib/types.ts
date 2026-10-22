@@ -1,4 +1,22 @@
-export type Source = "deezer" | "audius" | "library" | "itunes" | "archive" | "jamendo" | "openverse" | "ytdlp";
+export type Source = "deezer" | "audius" | "library" | "archive" | "jamendo" | "openverse";
+
+/** Официальные ссылки (только переход на страницу, без аудио) */
+export interface OfficialLinks {
+  deezer?: string;
+  spotify: string;
+  yandex: string;
+}
+
+/** Ответ поиска треков: один лучший проверенный результат */
+export interface BestResult {
+  query: string;
+  mode: "track" | "artist";
+  best: Track | null;
+  more: Track[];
+  catalog: { id: string; title: string; artist: string; cover: string | null; duration: number; explicit: boolean } | null;
+  links: OfficialLinks | null;
+  partial: boolean;
+}
 
 export interface Track {
   id: string;
@@ -17,7 +35,9 @@ export interface Track {
   mood?: string | null;
   explicit?: boolean;
   releaseDate?: string | null;
-  links?: { yandex: string; spotify: string; youtube: string };
+  links?: OfficialLinks;
+  /** Та же запись в других источниках: плеер переключится на них, если поток не заиграет */
+  alternates?: Track[];
   likedAt?: number;
 }
 

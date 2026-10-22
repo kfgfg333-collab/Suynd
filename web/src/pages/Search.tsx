@@ -1,12 +1,16 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { Clock, Search as SearchIcon, SearchX, X } from "lucide-react";
+import { Clock, ExternalLink, MoreHorizontal, Pause, Play, Search as SearchIcon, SearchX, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { TrackList } from "../components/TrackRow";
-import { Cover, EmptyState, ErrorState, Segmented, Skeleton, TrackListSkeleton } from "../components/ui";
-import { enc } from "../lib/api";
-import type { Album, Artist, Track } from "../lib/types";
+import { Button, Cover, EmptyState, ErrorState, Segmented, Skeleton, SourceBadge } from "../components/ui";
+import { enc, SOURCE_LABELS } from "../lib/api";
+import { formatTime } from "../lib/format";
+import { openLink } from "../lib/telegram";
+import type { Album, Artist, BestResult } from "../lib/types";
 import { useApi, useDebounced } from "../lib/useApi";
+import { useCurrentTrack, usePlayer } from "../store/player";
+import { useUi } from "../store/ui";
 
 type Tab = "tracks" | "artists" | "albums";
 const RECENT_KEY = "suynd.recentSearches";
@@ -99,7 +103,7 @@ export default function SearchPage() {
             ))}
           </div>
         ) : (
-          <EmptyState icon={<SearchIcon className="h-7 w-7" />} title="Найдите любимую музыку" text="Только полные треки: Audius, Internet Archive, Openverse, Jamendo, YouTube (если на сервере есть yt-dlp) и ваши файлы. Совпадения из каталога Deezer проверяем — нет ли где-то полной версии." />
+          <EmptyState icon={<SearchIcon className="h-7 w-7" />} title="Найдите любимую музыку" text="Напишите песню или исполнителя. Suynd ищет полную версию в Audius, Jamendo, Internet Archive, Openverse и ваших файлах, проверяет, что звук доступен, и показывает один лучший результат." />
         )
       ) : (
         <AnimatePresence mode="wait">
@@ -113,64 +117,141 @@ export default function SearchPage() {
 }
 
 function Results({ q, tab }: { q: string; tab: Tab }) {
-  const { data, error, loading, reload } = useApi<{
-    items: (Track | Artist | Album)[];
-    unavailable?: { id: string; title: string; artist: string; explicit: boolean }[];
-    warnings?: string[];
-  }>(
-    `/api/search?q=${enc(q)}&type=${tab}`,
-  );
+  if (tab === "tracks") return <TrackResults q={q} />;
+  return <CatalogResults q={q} tab={tab} />;
+}
+
+/** Один лучший проверенный результат; если его нет — честно говорим об этом и даём официальные ссылки */
+function TrackResults({ q }: { q: string }) {
+  const { data, error, loading, reload } = useApi<BestResult>(`/api/search?q=${enc(q)}&type=tracks`);
+  const playList = usePlayer((s) => s.playList);
+  const isPlaying = usePlayer((s) => s.isPlaying);
+  const current = useCurrentTrack();
+  const openSheet = useUi((s) => s.openSheet);
+  const [showMore, setShowMore] = useState(false);
+  useEffect(() => setShowMore(false), [q]);
+
   if (error) return <ErrorState message={error} onRetry={reload} />;
-  if (loading || !data) return tab === "tracks" ? <TrackListSkeleton rows={8} /> : <GridSkeleton round={tab === "artists"} />;
-  const unavailable = tab === "tracks" ? (data.unavailable ?? []) : [];
-  // Источник не ответил (например, на сервере нет yt-dlp) — остальные результаты показываем, причину пишем строкой
-  const warnings = (data.warnings ?? []).length > 0 && (
-    <div className="mx-4 mb-3 flex items-start justify-between gap-3 rounded-2xl bg-surface px-4 py-3 text-xs text-muted">
-      <div className="space-y-1">
-        {data.warnings!.map((w) => (
-          <div key={w}>{w}</div>
-        ))}
-      </div>
+  if (loading || !data) return <BestSkeleton />;
+
+  const partialNote = data.partial && (
+    <div className="mx-4 mt-3 flex items-center justify-between gap-3 rounded-2xl bg-surface px-4 py-3 text-xs text-muted">
+      <span>Часть источников сейчас не ответила — результат может быть неполным.</span>
       <button onClick={reload} className="shrink-0 font-bold text-white/80">
         Повторить
       </button>
     </div>
   );
-  if (!data.items.length && !unavailable.length)
-    return (
-      <>
-        {warnings}
-        <EmptyState icon={<SearchX className="h-7 w-7" />} title="Ничего не нашлось" text={`По запросу «${q}» пусто. Попробуйте написать иначе.`} />
-      </>
-    );
 
-  if (tab === "tracks") {
+  if (!data.best) {
+    const c = data.catalog;
     return (
       <>
-        {warnings}
-        {data.items.length > 0 ? (
-          <TrackList tracks={data.items as Track[]} title={`Поиск: ${q}`} />
-        ) : (
-          <EmptyState icon={<SearchX className="h-7 w-7" />} title="Полная версия недоступна" text="Полных треков по этому запросу в подключённых источниках не нашлось." />
-        )}
-        {unavailable.length > 0 && (
-          <div className="mx-4 mt-4 rounded-2xl bg-surface p-4">
-            <div className="text-xs font-bold uppercase tracking-widest text-muted">Есть в каталоге, но полной версии нет</div>
-            <ul className="mt-2 space-y-1.5">
-              {unavailable.map((u) => (
-                <li key={u.id} className="flex items-center gap-2 text-sm text-white/70">
-                  {u.explicit && <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] bg-white/60 text-[10px] font-black text-black">E</span>}
-                  <span className="truncate">
-                    {u.artist} — {u.title}
-                  </span>
-                </li>
-              ))}
-            </ul>
+        <EmptyState
+          icon={<SearchX className="h-7 w-7" />}
+          title="Полной версии нет в разрешённых источниках"
+          text={
+            c
+              ? `«${c.artist} — ${c.title}» есть в каталоге, но ни один из подключённых источников не даёт её целиком. Превью, ремиксы и чужие версии мы не подставляем.`
+              : `По запросу «${q}» подходящих полных треков не нашлось. Попробуйте написать иначе.`
+          }
+        />
+        {data.links && (
+          <div className="mx-4 space-y-2">
+            <div className="text-xs font-bold uppercase tracking-widest text-muted">Послушать в официальных сервисах</div>
+            {data.links.deezer && <LinkRow label="Deezer" url={data.links.deezer} />}
+            <LinkRow label="Spotify" url={data.links.spotify} />
+            <LinkRow label="Яндекс Музыка" url={data.links.yandex} />
           </div>
         )}
+        {partialNote}
       </>
     );
   }
+
+  const best = data.best;
+  const active = current?.id === best.id;
+  return (
+    <div>
+      <div className="mx-4 rounded-3xl bg-surface p-4">
+        <div className="mb-3 text-xs font-bold uppercase tracking-widest text-muted">Лучший результат</div>
+        <div className="flex items-center gap-4">
+          <Cover src={best.cover} className="h-24 w-24" rounded="rounded-2xl" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-lg font-bold">{best.title}</div>
+            <div className="truncate text-sm text-muted">{best.artist}</div>
+            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted">
+              <SourceBadge track={best} />
+              <span className="truncate">
+                {SOURCE_LABELS[best.source]}
+                {best.duration ? ` · ${formatTime(best.duration)}` : ""}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div className="mt-4 flex items-center gap-2">
+          <Button className="flex-1" onClick={() => playList([best], 0, `Поиск: ${q}`)}>
+            {active && isPlaying ? <Pause className="h-4 w-4 fill-black" /> : <Play className="h-4 w-4 fill-black" />}
+            {active && isPlaying ? "Пауза" : "Слушать"}
+          </Button>
+          <Button variant="secondary" onClick={() => openSheet(best, {})}>
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </div>
+        {(best.alternates?.length ?? 0) > 0 && (
+          <div className="mt-3 text-[11px] text-muted">
+            Запасные источники этой записи: {[...new Set(best.alternates!.map((a) => SOURCE_LABELS[a.source]))].join(", ")} — включатся сами, если основной не ответит.
+          </div>
+        )}
+      </div>
+      {data.more.length > 0 && (
+        <div className="mt-4">
+          {showMore ? (
+            <TrackList tracks={data.more} title={`Поиск: ${q}`} />
+          ) : (
+            <button onClick={() => setShowMore(true)} className="mx-4 text-sm font-bold text-white/80">
+              Другие песни по запросу ({data.more.length})
+            </button>
+          )}
+        </div>
+      )}
+      {partialNote}
+    </div>
+  );
+}
+
+function LinkRow({ label, url }: { label: string; url: string }) {
+  return (
+    <button onClick={() => openLink(url)} className="flex w-full items-center justify-between rounded-2xl bg-surface px-4 py-3 text-sm font-semibold active:bg-white/5">
+      {label}
+      <ExternalLink className="h-4 w-4 text-muted" />
+    </button>
+  );
+}
+
+function BestSkeleton() {
+  return (
+    <div className="mx-4 rounded-3xl bg-surface p-4">
+      <Skeleton className="mb-3 h-3 w-1/3" />
+      <div className="flex items-center gap-4">
+        <Skeleton className="h-24 w-24 rounded-2xl" />
+        <div className="flex-1 space-y-2">
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="h-3 w-1/2" />
+        </div>
+      </div>
+      <Skeleton className="mt-4 h-10 w-full rounded-full" />
+      <div className="mt-3 text-center text-xs text-muted">Ищем во всех источниках и проверяем, что звук доступен…</div>
+    </div>
+  );
+}
+
+function CatalogResults({ q, tab }: { q: string; tab: Exclude<Tab, "tracks"> }) {
+  const { data, error, loading, reload } = useApi<{ items: (Artist | Album)[] }>(`/api/search?q=${enc(q)}&type=${tab}`);
+  if (error) return <ErrorState message={error} onRetry={reload} />;
+  if (loading || !data) return <GridSkeleton round={tab === "artists"} />;
+  if (!data.items.length)
+    return <EmptyState icon={<SearchX className="h-7 w-7" />} title="Ничего не нашлось" text={`По запросу «${q}» пусто. Попробуйте написать иначе.`} />;
   if (tab === "artists") {
     return (
       <div className="grid grid-cols-3 gap-x-3 gap-y-5 px-4">

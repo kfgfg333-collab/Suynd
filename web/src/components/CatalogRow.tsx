@@ -8,7 +8,7 @@ import { Cover } from "./ui";
  * Строка каталога (Deezer): у источника только превью, поэтому здесь нет воспроизведения.
  * Нажатие ищет полную версию в подключённых источниках и включает её, только если она подтверждена.
  */
-export function CatalogRow({ track, index }: { track: Track; index?: number }) {
+function CatalogRow({ track, index }: { track: Track; index?: number }) {
   const findFull = usePlayer((s) => s.findFull);
   return (
     <button onClick={() => findFull(track)} className="flex w-full items-center gap-3 px-4 py-2 text-left active:bg-white/[0.03]">

@@ -70,7 +70,7 @@ function loadWaveSettings(): { mode: WaveMode; energy: WaveEnergy } {
 }
 
 /* ───────── Аудио-движок ───────── */
-export const audio = new Audio();
+const audio = new Audio();
 audio.preload = "auto";
 (audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
 const preloader = new Audio();
@@ -85,7 +85,7 @@ let errorStreak = 0;
 let loadToken = 0;
 let retriedId: string | null = null;
 
-/** Почему сервер не отдал поток (удалено, регион, нет yt-dlp…): <audio> сам этого не сообщает */
+/** Почему сервер не отдал поток (источник не отвечает, файл удалён…): <audio> сам этого не сообщает */
 async function streamProblem(track: Track): Promise<{ message: string | null; code?: string }> {
   try {
     const res = await fetch(streamUrl(track), { headers: { range: "bytes=0-1" } });
@@ -100,19 +100,22 @@ async function streamProblem(track: Track): Promise<{ message: string | null; co
   }
 }
 
-// Для каждого трека альтернативу ищем не больше одного раза — никаких циклов
-const alternativeTried = new Set<string>();
+/**
+ * Следующий запасной источник той же записи. Новый трек несёт только оставшиеся варианты,
+ * поэтому каждый источник пробуется один раз — без циклов.
+ */
+function nextAlternate(track: Track): Track | null {
+  const rest = (track.alternates ?? []).filter(isFullTrack);
+  const [alt, ...others] = rest;
+  return alt ? { ...alt, alternates: others } : null;
+}
 
-/** YouTube не отдал звук — ищем ту же запись в разрешённом источнике (Audius, Jamendo, CC-архивы, ваши файлы) */
-async function findAlternative(track: Track): Promise<Track | null> {
-  if (track.source !== "ytdlp" || alternativeTried.has(track.id)) return null;
-  alternativeTried.add(track.id);
-  try {
-    const r = await api<{ track: Track | null }>(`/api/tracks/${enc(track.id)}/alternative`);
-    return r.track && isFullTrack(r.track) && r.track.source !== "ytdlp" ? r.track : null;
-  } catch {
-    return null;
-  }
+/** Подменить текущий трек в очереди запасным источником и включить его */
+function switchToAlternate(track: Track, alt: Track, why: string) {
+  const { queue, index } = usePlayer.getState();
+  usePlayer.setState({ queue: queue.map((q, i) => (i === index ? { ...q, track: alt } : q)) });
+  toast(`«${track.title}»: ${why}. Включаю ту же запись из источника «${SOURCE_LABELS[alt.source]}»`);
+  void loadTrack(alt, true);
 }
 
 async function loadTrack(track: Track, autoplay: boolean) {
@@ -169,6 +172,8 @@ audio.addEventListener("loadedmetadata", () => {
     audio.pause();
     audio.removeAttribute("src");
     usePlayer.setState({ isPlaying: false, buffering: false });
+    const alt = nextAlternate(track);
+    if (alt) return switchToAlternate(track, alt, "источник отдал фрагмент");
     toast(`«${track.title}»: источник отдал фрагмент. ${FULL_UNAVAILABLE}`, "error");
     setTimeout(() => usePlayer.getState().next(), 600);
   }
@@ -222,25 +227,13 @@ audio.addEventListener("error", () => {
   void (async () => {
     const { message: reason } = await streamProblem(track);
     if (token !== loadToken) return;
-    if (track.source === "ytdlp") {
-      toast(`«${track.title}»: ${reason ?? "YouTube не отдал звук"}. Ищу эту запись в других источниках…`, "error");
-      const alt = await findAlternative(track);
-      if (token !== loadToken) return;
-      if (alt) {
-        // Подменяем в очереди только этот трек и явно говорим, откуда звук
-        const { queue, index } = usePlayer.getState();
-        usePlayer.setState({ queue: queue.map((q, i) => (i === index ? { ...q, track: alt } : q)) });
-        toast(`Играет та же запись из источника «${SOURCE_LABELS[alt.source]}»: ${alt.artist} — ${alt.title}`, "success");
-        void loadTrack(alt, true);
-        return;
-      }
-    }
+    const alt = nextAlternate(track);
+    if (alt) return switchToAlternate(track, alt, reason ?? "источник не отдал звук");
     if (errorStreak >= 3) {
       toast(reason ? `Не получается воспроизвести: ${reason}` : "Не получается воспроизвести треки. Проверьте интернет.", "error");
       return;
     }
-    const tail = track.source === "ytdlp" ? "другого разрешённого источника нет — включаю следующий" : "включаю следующий";
-    toast(`«${track.title}»: ${reason ?? "трек недоступен"} — ${tail}`, "error");
+    toast(`«${track.title}»: ${reason ?? "трек недоступен"} — включаю следующий`, "error");
     setTimeout(() => token === loadToken && usePlayer.getState().next(), 900);
   })();
 });
@@ -548,7 +541,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
         toast(
           r.checked.length
             ? `${FULL_UNAVAILABLE}: похожие записи нашлись, но ни одна не прошла проверку аудио`
-            : `${FULL_UNAVAILABLE} в подключённых источниках (Audius, Jamendo, Internet Archive, Openverse, YouTube, ваши файлы)`,
+            : `${FULL_UNAVAILABLE} в подключённых источниках (Audius, Jamendo, Internet Archive, Openverse, ваши файлы)`,
           "error",
         );
         return;
