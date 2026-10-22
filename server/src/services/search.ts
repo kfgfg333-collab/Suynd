@@ -70,6 +70,7 @@ const MAX_MORE = 5;
 const RESULT_TTL_MS = 10 * 60_000;
 const EMPTY_TTL_MS = 2 * 60_000;
 const PROVIDER_COOLDOWN_MS = 30_000;
+const OPTIONAL_GRACE_MS = 500;
 const PROBE_OK_TTL_MS = 10 * 60_000;
 const PROBE_FAIL_TTL_MS = 2 * 60_000;
 const MAX_ENTRIES = 500;
@@ -123,6 +124,12 @@ const uniqueById = (list: Track[]) => {
 // Сообщения об ошибках источников без параметров запросов (там может быть ключ API)
 const safeError = (e: unknown) => String((e as Error)?.message ?? e).replace(/(client_id|key|token)=[^&\s]+/gi, "$1=***").slice(0, 120);
 
+/** Эталон: первая песня каталога, которую запрос действительно называет (explicit предпочтительнее clean) */
+export function pickReference(query: string, catalog: Track[]): Track | null {
+  const named = catalog.filter((c) => namesTrack(query, c));
+  return named.find((c) => !isCensoredTitle(c.title)) ?? named[0] ?? null;
+}
+
 export function createSearch(deps: SearchDeps) {
   const results = new Map<string, { until: number; value: BestResult | FullVersionResult }>();
   const inflight = new Map<string, Promise<BestResult | FullVersionResult>>();
@@ -155,7 +162,12 @@ export function createSearch(deps: SearchDeps) {
           }
         }),
       );
-    const lists = await Promise.all(jobs);
+    // Необязательный источник не задерживает выдачу: ждём его не дольше чем 0,5 с после основных
+    const enabled = deps.providers.filter((p) => p.enabled());
+    const perProvider = enabled.flatMap((p) => queries.map(() => p));
+    const core = Promise.all(jobs.filter((_, i) => !perProvider[i].optional));
+    const grace = core.then(() => new Promise<Track[]>((r) => setTimeout(() => r([]), OPTIONAL_GRACE_MS)));
+    const lists = await Promise.all(jobs.map((j, i) => (perProvider[i].optional ? Promise.race([j, grace]) : j)));
     return { tracks: uniqueById(lists.flat()).filter(isConfirmedFull), failed: [...failed] };
   }
 
@@ -229,9 +241,7 @@ export function createSearch(deps: SearchDeps) {
     return cached(`q:${query.toLowerCase()}`, async () => {
       const started = Date.now();
       const [catalog, first] = await Promise.all([deps.catalog(query).catch(() => [] as Track[]), gather([query])]);
-      // Эталон: первая песня каталога, которую запрос действительно называет (explicit предпочтительнее clean)
-      const named = catalog.filter((c) => namesTrack(query, c));
-      const ref = named.find((c) => !isCensoredTitle(c.title)) ?? named[0] ?? null;
+      const ref = pickReference(query, catalog);
       let pool = first.tracks;
       const failed = new Set(first.failed);
       if (ref) {
@@ -304,7 +314,7 @@ export function createSearch(deps: SearchDeps) {
 /* ───────── Настоящие зависимости ───────── */
 
 /** Каталог Deezer с вариантами транслитерации: «Милано Скам» находит «Scally Milano — Скам» */
-async function deezerCatalog(query: string): Promise<Track[]> {
+export async function deezerCatalog(query: string): Promise<Track[]> {
   const lists = await Promise.all(queryVariants(query).map((v) => withTimeout(deezer.searchTracks(v, 15), 6000).catch(() => [] as Track[])));
   return uniqueById(lists.flat()).slice(0, 20);
 }
@@ -329,7 +339,7 @@ function libraryMatches(query: string): Track[] {
 /** Источник реально отдаёт аудио: первые байты, статус 200/206 и звуковой тип */
 export async function probeAudio(url: string): Promise<boolean> {
   try {
-    const res = await fetch(url, { headers: { range: "bytes=0-1023" }, redirect: "follow", signal: AbortSignal.timeout(8000) });
+    const res = await fetch(url, { headers: { range: "bytes=0-1023" }, redirect: "follow", signal: AbortSignal.timeout(4000) });
     const type = res.headers.get("content-type") ?? "";
     await res.body?.cancel();
     return (res.status === 200 || res.status === 206) && (type.startsWith("audio/") || type === "application/octet-stream");

@@ -4,7 +4,9 @@ import fs from "node:fs";
 import { Readable } from "node:stream";
 import { sendTrackToChat } from "../bot.js";
 import { db, schema } from "../db/index.js";
-import { UpstreamError } from "../http.js";
+import { isPrivateHost, UpstreamError } from "../http.js";
+
+export { isPrivateHost };
 import { archive } from "../providers/archive.js";
 import { audius, isAudiusDownloadable } from "../providers/audius.js";
 import { providers, streamSourceUrl } from "../providers/index.js";
@@ -13,6 +15,7 @@ import { openverseUrl } from "../providers/openverse.js";
 import { cachedExt, cachedPath, fillCache, isCacheable, serveCached } from "../services/audioCache.js";
 import { isConfirmedFull, isPreviewOnlyId } from "../services/fullOnly.js";
 import { search } from "../services/search.js";
+import { webSearch } from "../services/web.js";
 import { getTracks, resolveTrack, splitId } from "../services/tracks.js";
 import { TG_DOWNLOAD_LIMIT, telegramFileUrl } from "../telegramFiles.js";
 
@@ -74,16 +77,6 @@ function extForMime(mime: string | null | undefined, fallback = ".mp3"): string 
 }
 
 const attachment = (name: string) => `attachment; filename*=UTF-8''${encodeURIComponent(name)}`;
-
-/** Не даём ходить через /api/img во внутреннюю сеть сервера */
-export function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal") || h === "::1") return true;
-  const m = h.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
-  if (!m) return false;
-  const [a, b] = [Number(m[1]), Number(m[2])];
-  return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-}
 
 function safeFileName(s: string) {
   return s.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120) || "track";
@@ -210,6 +203,7 @@ export async function mediaRoutes(app: FastifyInstance) {
   /** Какие источники подключены (без ключей и внутренних адресов) */
   app.get("/api/sources", async () => ({
     items: providers.map((p) => ({ source: p.source, label: p.label, enabled: p.enabled() })),
+    webSearch: webSearch.configured(),
   }));
 
   /** Полная версия трека каталога Deezer в разрешённых источниках (с проверкой потока) */

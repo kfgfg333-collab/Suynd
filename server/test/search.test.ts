@@ -246,6 +246,15 @@ test("необязательный источник (Openverse) не делае�
   assert.equal(r.partial, false);
 });
 
+test("медленный необязательный источник не задерживает выдачу больше чем на 0,5 с", async () => {
+  const slowOptional = { ...prov("openverse", () => new Promise<Track[]>(() => {}), 5000), optional: true };
+  const { s } = make({ providers: [slowOptional, prov("audius", async () => [t("au:1", "audius", "Kevin MacLeod", "Monkeys Spinning Monkeys", 125)])] });
+  const started = Date.now();
+  const r = await s.findBest("Kevin MacLeod Monkeys");
+  assert.ok(Date.now() - started < 1200, `${Date.now() - started} мс`);
+  assert.equal(r.best?.id, "au:1");
+});
+
 test("очистка ввода и правила сопоставления", () => {
   assert.equal(sanitizeQuery("  a\u0000b\nc  "), "a b c");
   assert.equal(sanitizeQuery("x".repeat(500)).length, 100);

@@ -28,6 +28,16 @@ function tokens(s: string): Set<string> {
   );
 }
 
+/** Какая доля слов из needle есть в hay (0..1) */
+export function coverage(needle: string, hay: string): number {
+  const n = tokens(needle);
+  if (!n.size) return 0;
+  const h = tokens(hay);
+  let hit = 0;
+  for (const t of n) if (h.has(t)) hit++;
+  return hit / n.size;
+}
+
 /** Доля общих слов (0..1) */
 export function similarity(a: string, b: string): number {
   const ta = tokens(a);

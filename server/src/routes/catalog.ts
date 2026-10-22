@@ -6,6 +6,7 @@ import { onlyFull } from "../services/fullOnly.js";
 import { normalize } from "../services/match.js";
 import { sanitizeQuery, search } from "../services/search.js";
 import { resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
+import { webSearch } from "../services/web.js";
 import type { Track } from "../types.js";
 
 /** Чередуем результаты двух источников, чтобы в выдаче были оба */
@@ -45,6 +46,12 @@ export async function catalogRoutes(app: FastifyInstance) {
     // Треки: один лучший проверенный результат из разрешённых источников (см. services/search.ts)
     return search.findBest(query);
   });
+
+  /**
+   * Где ещё в интернете можно послушать трек: страницы из официальных поисковых API, проверенные как превью ссылки.
+   * Звук с этих сайтов Suynd не проигрывает — клиент открывает страницу в браузере.
+   */
+  app.get("/api/search/web", async (req) => webSearch.search(sanitizeQuery((req.query as { q?: string }).q)));
 
   app.get("/api/home", async () => {
     const [chartAlbums, trending] = await Promise.all([settled(deezer.chartAlbums(12), []), settled(audius.trending(null, 30), [])]);

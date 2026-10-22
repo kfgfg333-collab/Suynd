@@ -1,3 +1,6 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+
 /** Небольшой fetch-помощник: таймаут, повтор при сетевой ошибке и кэш в памяти. */
 const cache = new Map<string, { expires: number; value: unknown }>();
 const MAX_CACHE = 2000;
@@ -58,4 +61,27 @@ export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) =>
   });
   await Promise.all(workers);
   return results;
+}
+
+/** Внутренние адреса сервера: туда не ходим по ссылкам из запросов (защита от SSRF) */
+export function isPrivateHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".local") || h.endsWith(".internal") || h === "::1" || h === "::") return true;
+  if (isIP(h) === 6) return /^(fc|fd|fe8|fe9|fea|feb)/.test(h) || h.startsWith("::ffff:") && isPrivateHost(h.slice(7));
+  const m = h.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
+/** То же после DNS: имя сайта не должно указывать на внутренний адрес */
+export async function resolvesToPrivate(host: string): Promise<boolean> {
+  if (isPrivateHost(host)) return true;
+  if (isIP(host)) return false;
+  try {
+    const addrs = await lookup(host, { all: true });
+    return addrs.some((a) => isPrivateHost(a.address));
+  } catch {
+    return true; // не резолвится — не ходим
+  }
 }
