@@ -3,6 +3,7 @@ import { db, schema } from "../db/index.js";
 import { archive } from "../providers/archive.js";
 import { audius } from "../providers/audius.js";
 import { jamendo } from "../providers/jamendo.js";
+import { openverse } from "../providers/openverse.js";
 import type { Track } from "../types.js";
 import { isCensoredTitle, isConfirmedFull, MIN_FULL_SEC } from "./fullOnly.js";
 import { getTracks, upsertTracks } from "./tracks.js";
@@ -94,6 +95,7 @@ export const defaultProviders: SearchProvider[] = [
   (q) => audius.searchTracks(q, 15),
   (q) => jamendo.searchTracks(q, 10),
   (q) => archive.searchTracks(q, 10),
+  (q) => openverse.searchTracks(q, 10),
 ];
 
 interface FindOptions {

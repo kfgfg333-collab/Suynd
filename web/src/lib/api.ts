@@ -100,6 +100,7 @@ export const SOURCE_LABELS: Record<Track["source"], string> = {
   itunes: "iTunes",
   archive: "Internet Archive · CC",
   jamendo: "Jamendo · CC",
+  openverse: "Openverse · CC",
 };
 
 /** Загрузка файла на сервер с прогрессом (fetch не умеет прогресс отправки) */

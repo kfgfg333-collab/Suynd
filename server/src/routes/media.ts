@@ -8,6 +8,8 @@ import { UpstreamError } from "../http.js";
 import { audius, isAudiusDownloadable } from "../providers/audius.js";
 import { archive } from "../providers/archive.js";
 import { jamendo } from "../providers/jamendo.js";
+import { openverseUrl } from "../providers/openverse.js";
+import { cachedPath, cacheStats, fillCache, isCacheable, serveCached } from "../services/audioCache.js";
 import { findFullVersion } from "../services/fullVersion.js";
 import { isConfirmedFull, isPreviewOnlyId } from "../services/fullOnly.js";
 import type { Track } from "../types.js";
@@ -70,6 +72,12 @@ async function downloadableUrl(prefix: string, raw: string): Promise<string> {
     if (!track || !url) throw new UpstreamError("Файл не найден в Internet Archive", 404);
     return url;
   }
+  if (prefix === "ov") {
+    // CC-лицензия Openverse разрешает копирование; ссылка проверяется по белому списку хостов
+    const url = openverseUrl(raw);
+    if (!url) throw new UpstreamError("Файл не найден", 404);
+    return url;
+  }
   throw new UpstreamError("Скачивание недоступно для этого трека", 403);
 }
 
@@ -86,6 +94,7 @@ export async function streamSourceUrl(prefix: string, raw: string): Promise<stri
   if (prefix === "au") return audius.streamUrl(raw);
   if (prefix === "jm") return (await jamendo.raw(raw))?.audio ?? null;
   if (prefix === "ia") return archive.fileUrl(raw);
+  if (prefix === "ov") return openverseUrl(raw);
   return null;
 }
 
@@ -95,17 +104,33 @@ export async function mediaRoutes(app: FastifyInstance) {
    * (CDN Deezer, узлы Audius, archive.org), сервер за рубежом всё равно его получит.
    */
   app.get("/api/stream/:id", async (req, reply) => {
-    const [prefix, raw] = splitId((req.params as { id: string }).id);
+    const id = (req.params as { id: string }).id;
+    const [prefix, raw] = splitId(id);
+    if (isPreviewOnlyId(id)) throw new UpstreamError(FULL_UNAVAILABLE, 410);
+    // Уже в кэше — играем с диска сервера
+    const cached = cachedPath(id);
+    if (cached) return serveCached(req, reply, cached);
+
+    let url: string | null;
+    let mime: string | undefined;
     if (prefix === "lib") {
       const row = libraryRow(raw);
       if ((row.size ?? 0) > TG_DOWNLOAD_LIMIT) throw new UpstreamError("Файл больше 20 МБ — Telegram не позволяет его проигрывать", 413);
-      return proxyAudio(req, reply, await telegramFileUrl(row.fileId), row.mime ? { "content-type": row.mime } : {});
+      url = await telegramFileUrl(row.fileId);
+      mime = row.mime ?? undefined;
+    } else {
+      url = await streamSourceUrl(prefix, raw);
     }
-    if (isPreviewOnlyId(`${prefix}:${raw}`)) throw new UpstreamError(FULL_UNAVAILABLE, 410);
-    const url = await streamSourceUrl(prefix, raw);
     if (!url) throw new UpstreamError("Аудио недоступно", 404);
-    return proxyAudio(req, reply, url);
+    // Параллельно кладём полный файл в кэш (только для источников, где копирование разрешено)
+    if (isCacheable(id)) {
+      const [track] = getTracks([id]);
+      if (track && isConfirmedFull(track)) void fillCache(id, url, track.duration, mime);
+    }
+    return proxyAudio(req, reply, url, mime ? { "content-type": mime } : {});
   });
+
+  app.get("/api/cache", async () => cacheStats());
 
   /** Скачивание для офлайна — мои файлы и источники, где скачивание разрешено */
   app.get("/api/download/:id", async (req, reply) => {
@@ -113,6 +138,10 @@ export async function mediaRoutes(app: FastifyInstance) {
     const [prefix, raw] = splitId(id);
     const [track] = getTracks([id]);
     const name = safeFileName(track ? `${track.artist} - ${track.title}` : id);
+    const cached = cachedPath(id);
+    if (cached && track && isConfirmedFull(track) && (prefix === "lib" || track.downloadable)) {
+      return serveCached(req, reply, cached, { "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(name + ".mp3")}` });
+    }
     if (prefix === "lib") {
       const row = libraryRow(raw);
       if ((row.size ?? 0) > TG_DOWNLOAD_LIMIT) throw new UpstreamError("Файл больше 20 МБ — Telegram не отдаёт такие файлы ботам", 413);

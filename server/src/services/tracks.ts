@@ -99,5 +99,6 @@ export function splitId(id: string): [string, string] {
 
 export function isValidTrackId(id: unknown): id is string {
   // ia:… — base64url от «идентификатор/файл», поэтому длиннее
-  return typeof id === "string" && (/^(dz|au|lib|it|jm):[A-Za-z0-9_-]{1,64}$/.test(id) || /^ia:[A-Za-z0-9_-]{4,400}$/.test(id));
+  // ia:/ov: — base64url от «идентификатор/файл» или ссылки на файл, поэтому длиннее
+  return typeof id === "string" && (/^(dz|au|lib|it|jm):[A-Za-z0-9_-]{1,64}$/.test(id) || /^(ia|ov):[A-Za-z0-9_-]{4,400}$/.test(id));
 }

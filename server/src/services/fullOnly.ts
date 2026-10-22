@@ -5,7 +5,7 @@ import type { Source, Track } from "../types.js";
  * Deezer и iTunes отдают лишь 30-секундные фрагменты — их записи служат каталогом
  * (метаданные, обложки, поиск полной версии), но никогда не воспроизводятся.
  */
-export const FULL_SOURCES: ReadonlySet<Source> = new Set<Source>(["audius", "archive", "jamendo", "library"]);
+export const FULL_SOURCES: ReadonlySet<Source> = new Set<Source>(["audius", "archive", "jamendo", "openverse", "library"]);
 export const PREVIEW_ONLY_SOURCES: ReadonlySet<Source> = new Set<Source>(["deezer", "itunes"]);
 
 /** Короче — считаем фрагментом, даже если источник называет это треком */

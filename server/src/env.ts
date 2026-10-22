@@ -27,6 +27,8 @@ export const env = {
   botDisabled: process.env.BOT_DISABLED === "true",
   // Необязательно: бесплатный ключ Jamendo (https://devportal.jamendo.com) — ещё один источник полных треков
   jamendoClientId: process.env.JAMENDO_CLIENT_ID?.trim() || "",
+  // Кэш полных аудиофайлов на диске сервера (CC-источники и ваши файлы). 0 — выключить
+  audioCacheMb: Number(process.env.AUDIO_CACHE_MB ?? 1024),
 };
 
 if (!Number.isFinite(env.allowedUserId) || env.allowedUserId <= 0) {

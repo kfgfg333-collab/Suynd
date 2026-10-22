@@ -1,4 +1,4 @@
-export type Source = "deezer" | "audius" | "library" | "itunes" | "archive" | "jamendo";
+export type Source = "deezer" | "audius" | "library" | "itunes" | "archive" | "jamendo" | "openverse";
 
 export interface Track {
   id: string; // dz:123 | au:abc | lib:7

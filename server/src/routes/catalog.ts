@@ -3,10 +3,12 @@ import { audius } from "../providers/audius.js";
 import { deezer } from "../providers/deezer.js";
 import { archive } from "../providers/archive.js";
 import { jamendo } from "../providers/jamendo.js";
+import { openverse } from "../providers/openverse.js";
 import { resolveTrack, splitId, upsertTracks } from "../services/tracks.js";
 import { mapLimit, UpstreamError } from "../http.js";
 import { isCensoredTitle, onlyFull } from "../services/fullOnly.js";
 import { findFullVersion, normalize, scoreCandidate } from "../services/fullVersion.js";
+import { queryVariants } from "../services/translit.js";
 import { fullStreamUrlOf } from "./media.js";
 import type { Track } from "../types.js";
 
@@ -26,7 +28,7 @@ const withTimeout = <T>(p: Promise<T>, ms: number) =>
   Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms))]);
 
 /** Один и тот же трек из разных источников — оставляем лучшую полную версию */
-const SOURCE_RANK: Record<string, number> = { library: 0, audius: 1, jamendo: 2, archive: 3 };
+const SOURCE_RANK: Record<string, number> = { library: 0, audius: 1, jamendo: 2, openverse: 3, archive: 4 };
 export function dedupeFull(list: Track[]): Track[] {
   const best = new Map<string, Track>();
   for (const t of onlyFull(list)) {
@@ -50,6 +52,15 @@ async function audiusTwin(name: string) {
 
 const RESOLVE_IN_SEARCH = 3;
 
+/** Каталог Deezer с вариантами транслитерации: «Милано Скам» находит «Scally Milano — Скам» */
+async function searchCatalog(query: string): Promise<Track[]> {
+  const variants = queryVariants(query);
+  const lists = await Promise.all(variants.map((v) => settled(deezer.searchTracks(v, 15), [])));
+  const seen = new Set<string>();
+  // Сначала результаты исходного запроса, потом вариантов
+  return lists.flat().filter((t) => !seen.has(t.id) && seen.add(t.id)).slice(0, 20);
+}
+
 export async function catalogRoutes(app: FastifyInstance) {
   app.get("/api/search", async (req) => {
     const { q = "", type = "tracks" } = req.query as { q?: string; type?: string };
@@ -67,13 +78,14 @@ export async function catalogRoutes(app: FastifyInstance) {
 
     // Полные треки: Audius, Jamendo (если задан ключ) и Internet Archive (CC / public domain).
     // Deezer — только каталог: у него лишь превью, поэтому по его совпадениям ищем полные версии в других источниках.
-    const [dz, au, jm, ia] = await Promise.all([
-      settled(deezer.searchTracks(query, 15), []),
+    const [dz, au, jm, ia, ov] = await Promise.all([
+      searchCatalog(query),
       settled(audius.searchTracks(query, 15), []),
       settled(jamendo.searchTracks(query, 8), []),
       settled(withTimeout(archive.searchTracks(query, 6), 6000), []),
+      settled(withTimeout(openverse.searchTracks(query, 8), 8000), []),
     ]);
-    let full = interleave(au, interleave(jm, ia, 2), 3);
+    let full = interleave(au, interleave(interleave(jm, ov, 2), ia, 2), 3);
 
     const covered = (c: Track) => full.some((f) => scoreCandidate(c, f) > 0);
     const toResolve = dz.filter((c) => !covered(c)).slice(0, RESOLVE_IN_SEARCH);

@@ -4,7 +4,7 @@
  */
 import type { Source, Track } from "./types";
 
-export const FULL_SOURCES: ReadonlySet<Source> = new Set<Source>(["audius", "archive", "jamendo", "library"]);
+export const FULL_SOURCES: ReadonlySet<Source> = new Set<Source>(["audius", "archive", "jamendo", "openverse", "library"]);
 export const MIN_FULL_SEC = 45;
 export const FULL_UNAVAILABLE = "Полная версия недоступна";
 
