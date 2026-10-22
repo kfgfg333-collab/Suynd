@@ -21,7 +21,19 @@ const cfg = env.ytDlp;
 const MAX_OUTPUT = 4 * 1024 * 1024;
 const MAX_QUEUE = 8;
 const SEARCH_TTL_MS = 30 * 60 * 1000;
-const ERROR_TTL_MS = 60 * 1000;
+// Сколько помним неудачу по ролику, чтобы обновление страницы, перемотка и предзагрузка не запускали yt-dlp снова
+const FAILURE_TTL_MS: Partial<Record<YtDlpErrorCode, number>> = {
+  network: 15_000,
+  timeout: 15_000,
+  bot_check: 2 * 60_000,
+  forbidden: 2 * 60_000,
+  rate_limited: 2 * 60_000,
+  failed: 60_000,
+};
+const PERMANENT_FAILURE_TTL_MS = 10 * 60_000;
+const NOT_CACHED: ReadonlySet<YtDlpErrorCode> = new Set<YtDlpErrorCode>(["busy", "not_installed", "disabled"]);
+// Временная сетевая ошибка — несколько повторов с паузой; постоянные ошибки не повторяем
+let retryDelaysMs = [1_000, 3_000];
 const NOT_INSTALLED_RETRY_MS = 60 * 1000;
 const MIN_SEC = 45;
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
@@ -49,6 +61,8 @@ export type YtDlpErrorCode =
   | "drm"
   | "live"
   | "rate_limited"
+  | "forbidden"
+  | "network"
   | "no_audio"
   | "too_short"
   | "failed";
@@ -69,6 +83,8 @@ const ERRORS: Record<YtDlpErrorCode, [number, string]> = {
   drm: [451, "Видео защищено DRM — воспроизведение невозможно"],
   live: [422, "Это прямой эфир или премьера, а не запись трека"],
   rate_limited: [503, "YouTube ограничил число запросов с сервера. Попробуйте позже"],
+  forbidden: [502, "YouTube отказал серверу в доступе к аудиопотоку (HTTP 403). Обычно так YouTube ограничивает IP-адрес сервера"],
+  network: [503, "Временная сетевая ошибка при обращении к YouTube. Попробуйте ещё раз"],
   no_audio: [502, "У видео нет доступной аудиодорожки"],
   too_short: [422, "Полная версия недоступна: ролик слишком короткий для полного трека"],
   failed: [502, "yt-dlp не смог получить данные видео"],
@@ -92,9 +108,14 @@ export function classifyYtDlpError(stderr: string): YtDlpErrorCode {
   if (/members[- ]only|channel.s members|join this channel|requires payment|purchase|premium/.test(s)) return "auth";
   if (/live event|is live|premieres? in|will begin in|is_upcoming/.test(s)) return "live";
   if (/http error 429|too many requests/.test(s)) return "rate_limited";
+  if (/http error 403|403: forbidden/.test(s)) return "forbidden";
   if (/removed|video unavailable|does not exist|has been terminated|no longer available|is not available/.test(s)) return "unavailable";
   if (/requested format is not available|no video formats/.test(s)) return "no_audio";
   if (/sign in|log in|login|cookies/.test(s)) return "auth";
+  if (
+    /timed out|connection (reset|refused|aborted)|temporary failure in name resolution|name or service not known|network is unreachable|http error 5\d\d|remote end closed|eof occurred|tunnel connection failed|unable to download (webpage|api|json)/.test(s)
+  )
+    return "network";
   return "failed";
 }
 
@@ -137,13 +158,30 @@ function baseArgs(): string[] {
   }
   // Новые yt-dlp решают JS-задачи YouTube внешним рантаймом. Node уже есть — это тот, что запускает сервер
   if (supportsJsRuntimes) args.push("--js-runtimes", `node:${process.execPath}`);
-  if (cfg.cookiesFile) args.push("--cookies", cfg.cookiesFile);
+  if (cookiesState().usable) args.push("--cookies", cfg.cookiesFile);
   return args;
+}
+
+/**
+ * Файл cookies необязателен. Используем его, только если он существует и читается;
+ * путь и содержимое никуда не выводим. Права шире 600 — повод для предупреждения.
+ */
+export function cookiesState(): { configured: boolean; usable: boolean; warning?: string } {
+  if (!cfg.cookiesFile) return { configured: false, usable: false };
+  try {
+    const st = fs.statSync(cfg.cookiesFile);
+    if (!st.isFile()) return { configured: true, usable: false, warning: "YT_DLP_COOKIES_FILE указывает не на файл" };
+    fs.accessSync(cfg.cookiesFile, fs.constants.R_OK | fs.constants.W_OK);
+    const open = (st.mode & 0o077) !== 0;
+    return { configured: true, usable: true, ...(open ? { warning: "Файл cookies доступен другим пользователям системы: выполните chmod 600" } : {}) };
+  } catch {
+    return { configured: true, usable: false, warning: "Файл YT_DLP_COOKIES_FILE не найден или недоступен серверу для чтения и записи" };
+  }
 }
 
 let supportsJsRuntimes = false;
 
-function run(args: string[], opts: { timeoutMs?: number; priority?: boolean } = {}): Promise<string> {
+function run(args: string[], opts: { timeoutMs?: number; priority?: boolean; anyExitCode?: boolean } = {}): Promise<string> {
   if (!cfg.enabled) return Promise.reject(new YtDlpError("disabled"));
   if (Date.now() < notInstalledUntil) return Promise.reject(new YtDlpError("not_installed"));
   return acquire(Boolean(opts.priority)).then(
@@ -192,6 +230,7 @@ function run(args: string[], opts: { timeoutMs?: number; priority?: boolean } = 
         });
         child.on("close", (code) => {
           if (code === 0) finish(null, stdout.trim());
+          else if (opts.anyExitCode && code !== null) finish(null, `${stdout}\n${stderr}`.trim());
           else finish(new YtDlpError(classifyYtDlpError(stderr)));
         });
       }),
@@ -203,25 +242,45 @@ function run(args: string[], opts: { timeoutMs?: number; priority?: boolean } = 
 export interface YtDlpStatus {
   available: boolean;
   version: string | null;
+  /** yt-dlp-ejs: без решателя JS-задач YouTube отвечает 403 на аудио */
+  jsChallengeSolver?: boolean;
+  jsRuntime?: string | null;
+  cookies?: { configured: boolean; usable: boolean; warning?: string };
+  lastStreamError?: { code: string; at: string } | null;
   code?: string;
   message?: string;
+  warnings?: string[];
 }
 let statusCache: { at: number; value: YtDlpStatus } | null = null;
+let lastStreamError: { code: string; at: string } | null = null;
+
+/** Разбор заголовка `yt-dlp -v` (без URL, без сети). Берём только версию, библиотеки и JS-рантайм */
+export function parseVerboseHeader(out: string): { jsChallengeSolver: boolean; jsRuntime: string | null } {
+  const libs = out.match(/Optional libraries: (.*)/)?.[1] ?? "";
+  const runtime = out.match(/JS runtimes: (\S+)/)?.[1] ?? null;
+  return { jsChallengeSolver: /\byt_dlp_ejs-/.test(libs), jsRuntime: runtime && runtime !== "none" ? runtime : null };
+}
 
 async function status(force = false): Promise<YtDlpStatus> {
-  if (!force && statusCache && Date.now() - statusCache.at < 5 * 60 * 1000) return statusCache.value;
+  if (!force && statusCache && Date.now() - statusCache.at < 5 * 60 * 1000) return { ...statusCache.value, lastStreamError };
   let value: YtDlpStatus;
   try {
     const version = (await run(["--version"], { timeoutMs: 10_000, priority: true })).split(/\s+/)[0] || null;
     // --js-runtimes появился в 2025.11; на старых версиях флаг сломал бы запуск
     supportsJsRuntimes = Boolean(version && version >= "2025.11");
-    value = { available: true, version };
+    const header = parseVerboseHeader(await run(["-v"], { timeoutMs: 10_000, priority: true, anyExitCode: true }).catch(() => ""));
+    const warnings: string[] = [];
+    if (!header.jsChallengeSolver) warnings.push("Не найден yt-dlp-ejs: YouTube будет отвечать 403 на аудио. Установите yt-dlp[default]");
+    if (!header.jsRuntime) warnings.push("yt-dlp не видит JS-рантайм (нужен yt-dlp 2025.11 или новее)");
+    const cookies = cookiesState();
+    if (cookies.warning) warnings.push(cookies.warning);
+    value = { available: true, version, ...header, cookies, ...(warnings.length ? { warnings } : {}) };
   } catch (e) {
     const err = e instanceof YtDlpError ? e : new YtDlpError("failed");
     value = { available: false, version: null, code: err.code, message: err.message };
   }
   statusCache = { at: Date.now(), value };
-  return value;
+  return { ...value, lastStreamError };
 }
 
 /** Перед первым настоящим вызовом узнаём версию; если бинарника нет — сразу понятная ошибка */
@@ -422,7 +481,37 @@ export function parseResolved(id: string, raw: string): ResolvedAudio {
   };
 }
 
-/** Свежая прямая ссылка на аудио. Кэшируется до истечения, чтобы перемотка не запускала yt-dlp заново */
+function rememberFailure(id: string, error: YtDlpError) {
+  lastStreamError = { code: error.code ?? `ytdlp_${error.reason}`, at: new Date().toISOString() };
+  if (NOT_CACHED.has(error.reason)) return;
+  if (failures.size > 500) failures.delete(failures.keys().next().value!);
+  failures.set(id, { until: Date.now() + (FAILURE_TTL_MS[error.reason] ?? PERMANENT_FAILURE_TTL_MS), error });
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function extract(id: string): Promise<ResolvedAudio> {
+  await ensureReady();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const raw = await run(["--skip-download", "--format", AUDIO_FORMAT, "--print", INFO_TEMPLATE, `https://www.youtube.com/watch?v=${id}`], {
+        // Полное извлечение дольше поиска (подпись, JS-задачи YouTube)
+        timeoutMs: Math.min(60_000, cfg.timeoutMs + 7_000),
+        priority: true,
+      });
+      return parseResolved(id, raw);
+    } catch (e) {
+      // Повторяем только временную сетевую ошибку и не больше двух раз
+      if (!(e instanceof YtDlpError) || e.reason !== "network" || attempt >= retryDelaysMs.length) throw e;
+      await sleep(retryDelaysMs[attempt]);
+    }
+  }
+}
+
+/**
+ * Свежая прямая ссылка на аудио. Кэшируется до истечения, чтобы перемотка не запускала yt-dlp заново.
+ * Одновременные запросы одного ролика ждут один и тот же процесс; неудача запоминается на время по её типу.
+ */
 async function resolve(id: string, opts: { force?: boolean } = {}): Promise<ResolvedAudio> {
   if (!ID_RE.test(id)) throw new YtDlpError("bad_id");
   if (opts.force) resolved.delete(id);
@@ -432,13 +521,8 @@ async function resolve(id: string, opts: { force?: boolean } = {}): Promise<Reso
   if (!opts.force && failed && failed.until > Date.now()) throw failed.error;
   const running = inflight.get(id);
   if (running) return running;
-  const job = ensureReady().then(() => run(["--skip-download", "--format", AUDIO_FORMAT, "--print", INFO_TEMPLATE, `https://www.youtube.com/watch?v=${id}`], {
-    // Полное извлечение дольше поиска (подпись, JS-задачи YouTube)
-    timeoutMs: Math.min(60_000, cfg.timeoutMs + 7_000),
-    priority: true,
-  }))
-    .then((raw) => {
-      const r = parseResolved(id, raw);
+  const job = extract(id)
+    .then((r) => {
       failures.delete(id);
       if (resolved.size > 300) resolved.delete(resolved.keys().next().value!);
       resolved.set(id, r);
@@ -446,8 +530,7 @@ async function resolve(id: string, opts: { force?: boolean } = {}): Promise<Reso
     })
     .catch((e) => {
       const error = e instanceof YtDlpError ? e : new YtDlpError("failed");
-      // Ошибку помним минуту: предзагрузка и повторные Range-запросы не плодят процессы
-      if (!["busy", "timeout", "not_installed", "disabled"].includes(error.reason)) failures.set(id, { until: Date.now() + ERROR_TTL_MS, error });
+      rememberFailure(id, error);
       throw error;
     })
     .finally(() => inflight.delete(id));
@@ -483,6 +566,13 @@ export const ytdlp = {
   invalidate(id: string) {
     resolved.delete(id);
   },
+  /** Медиасервер не отдал звук даже по свежей ссылке — запоминаем, чтобы не запускать yt-dlp на каждый запрос */
+  markFailed(id: string, reason: YtDlpErrorCode): YtDlpError {
+    resolved.delete(id);
+    const error = new YtDlpError(reason);
+    rememberFailure(id, error);
+    return error;
+  },
   async streamUrl(id: string): Promise<string | null> {
     return (await resolve(id)).url;
   },
@@ -493,7 +583,11 @@ export const ytdlpTesting = {
   allowMediaUrl(fn: (url: URL) => boolean) {
     mediaUrlAllowed = fn;
   },
+  setRetryDelays(ms: number[]) {
+    retryDelaysMs = ms;
+  },
   reset() {
+    lastStreamError = null;
     resolved.clear();
     failures.clear();
     searchCache.clear();

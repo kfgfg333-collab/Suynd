@@ -55,23 +55,23 @@ async function proxyAudio(req: FastifyRequest, reply: FastifyReply, url: string,
  */
 async function openYoutube(req: FastifyRequest, raw: string): Promise<{ upstream: Response; audio: ResolvedAudio }> {
   let audio = await ytdlp.resolve(raw);
-  let upstream = await openUpstream(req, audio.url, audio.headers);
+  // Сетевой сбой до медиасервера — временная ошибка, а не «видео недоступно»
+  const open = (a: ResolvedAudio) =>
+    openUpstream(req, a.url, a.headers).catch(() => {
+      throw ytdlp.markFailed(raw, "network");
+    });
+  let upstream = await open(audio);
   if ([403, 404, 410].includes(upstream.status)) {
+    // Ссылка могла истечь или быть отозвана: одна попытка со свежей
     await upstream.body?.cancel();
     ytdlp.invalidate(raw);
     audio = await ytdlp.resolve(raw, { force: true });
-    upstream = await openUpstream(req, audio.url, audio.headers);
+    upstream = await open(audio);
   }
   if (!upstream.ok && upstream.status !== 206) {
     await upstream.body?.cancel();
-    ytdlp.invalidate(raw);
-    throw new UpstreamError(
-      upstream.status === 403
-        ? "YouTube отказал серверу в доступе к аудио (HTTP 403). Так YouTube часто ограничивает серверы в дата-центрах; проверьте, что yt-dlp свежий и установлен с yt-dlp-ejs"
-        : `YouTube не отдал аудио (HTTP ${upstream.status}). Попробуйте ещё раз`,
-      502,
-      "ytdlp_upstream",
-    );
+    // Неудачу запоминаем: обновление страницы и перемотка не будут запускать yt-dlp снова
+    throw ytdlp.markFailed(raw, upstream.status === 403 ? "forbidden" : upstream.status >= 500 ? "network" : "unavailable");
   }
   // Лицензия становится известна только при полном извлечении — запоминаем, что ролик можно скачать
   if (audio.creativeCommons) markDownloadable(`yt:${raw}`);
@@ -302,6 +302,16 @@ export async function mediaRoutes(app: FastifyInstance) {
     ytdlp: await ytdlp.status(true),
     jamendo: { available: jamendo.enabled() },
   }));
+
+  /**
+   * Та же запись в другом разрешённом источнике — когда текущий (обычно YouTube) не отдаёт звук.
+   * YouTube здесь не предлагается: найденная версия проверяется реальным запросом к аудио.
+   */
+  app.get("/api/tracks/:id/alternative", async (req) => {
+    const track = await resolveTrack((req.params as { id: string }).id).catch(() => null);
+    if (!track) throw new UpstreamError("Трек не найден", 404);
+    return findFullVersion(track, { streamUrlOf: fullStreamUrlOf, excludeSources: ["ytdlp"] });
+  });
 
   /** Поиск полной версии трека (для превью Deezer/iTunes) в легальных полных источниках */
   app.get("/api/tracks/:id/full", async (req) => {

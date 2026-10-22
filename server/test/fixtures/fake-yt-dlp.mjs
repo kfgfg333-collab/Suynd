@@ -23,6 +23,21 @@ if (args.includes("--version")) {
   process.exit(0);
 }
 
+// Диагностика `yt-dlp -v` без URL: заголовок в stderr и код 2, как у настоящего
+if (args.includes("-v") && !args.includes("--print") && !args.includes("--flat-playlist")) {
+  process.stderr.write(
+    [
+      "[debug] yt-dlp version stable@2026.10.21 from yt-dlp/yt-dlp [fake] (pip)",
+      "[debug] Optional libraries: certifi-2026.1.1, requests-2.0, yt_dlp_ejs-0.8.0",
+      "[debug] JS runtimes: node-22.0.0",
+      "[debug] Proxy map: {'https': 'http://user:proxy-secret@10.0.0.1:3128'}",
+      "Usage: yt-dlp [OPTIONS] URL [URL...]",
+      "yt-dlp: error: You must provide at least one URL.",
+    ].join("\n") + "\n",
+  );
+  process.exit(2);
+}
+
 const target = args[args.length - 1];
 
 if (args.includes("--flat-playlist")) {
@@ -88,6 +103,24 @@ if (args.includes("--print")) {
       fail(`[youtube] ${id}: Sign in to confirm your age. This video may be inappropriate for some users.`);
     case "drm00000001":
       fail(`[youtube] ${id}: This video is DRM protected`);
+    case "flaky000001":
+      // Первые два запуска — временный сетевой сбой, третий успешен
+      if (count <= 2) fail(`[youtube] ${id}: Unable to download webpage: <urlopen error timed out> (caused by TransportError('timed out'))`);
+      process.stdout.write(JSON.stringify(info()));
+      process.exit(0);
+    case "netdown0001":
+      fail(`[youtube] ${id}: Unable to download webpage: Temporary failure in name resolution`);
+    case "forbid00001":
+      // Медиасервер всегда отвечает 403 — как YouTube для «чужого» IP
+      process.stdout.write(JSON.stringify(info({ url: `${media}/expired?id=${id}&n=${count}` })));
+      process.exit(0);
+    case "deadHost001":
+      process.stdout.write(JSON.stringify(info({ url: "http://127.0.0.1:9/audio.wav" })));
+      process.exit(0);
+    case "parallel001":
+      await sleep(400);
+      process.stdout.write(JSON.stringify(info()));
+      process.exit(0);
     case "slow0000001":
       await sleep(60_000);
       break;

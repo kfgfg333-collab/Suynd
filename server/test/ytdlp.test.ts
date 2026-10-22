@@ -79,10 +79,12 @@ const { upsertTracks, getTracks, isValidTrackId } = await import("../src/service
 const { ytdlp, ytdlpTesting, classifyYtDlpError, mapVideo, parseVideoTitle, YtDlpError } = await import("../src/providers/ytdlp.js");
 const { isConfirmedFull } = await import("../src/services/fullOnly.js");
 const { findFullVersion } = await import("../src/services/fullVersion.js");
-const { dedupeFull } = await import("../src/routes/catalog.js");
+const { dedupeFull, preferLicensed } = await import("../src/routes/catalog.js");
+const { scoreCandidate, variantMarks } = await import("../src/services/fullVersion.js");
 type Track = import("../src/types.js").Track;
 
 ytdlpTesting.allowMediaUrl((u) => u.protocol === "http:" && u.hostname === "127.0.0.1");
+ytdlpTesting.setRetryDelays([20, 20]);
 const app = await buildApp();
 const auth = { authorization: `Bearer ${issueSession(42).token}` };
 
@@ -326,4 +328,122 @@ test("одна запись из Internet Archive и YouTube показывае�
   const yt: Track = { ...ytTrack("LrM_Y39Gmhk"), artist: "Kevin MacLeod", title: "Monkeys Spinning Monkeys", duration: 131 };
   const ytCover: Track = { ...ytTrack("coverVer001"), artist: "Kevin MacLeod", title: "Monkeys Spinning Monkeys", duration: 240 };
   assert.deepEqual(dedupeFull([yt, ia, ytCover]).map((t) => t.id), ["ia:QUJDRC9maWxl", "yt:coverVer001"]);
+});
+
+test("диагностика: версия, yt-dlp-ejs и JS-рантайм видны, прокси и его пароль — нет", async () => {
+  const r = await app.inject({ url: "/api/sources/status", headers: auth });
+  const s = r.json().ytdlp;
+  assert.equal(s.version, "2026.10.21");
+  assert.equal(s.jsChallengeSolver, true);
+  assert.equal(s.jsRuntime, "node-22.0.0");
+  assert.deepEqual(s.cookies, { configured: false, usable: false });
+  assert.doesNotMatch(r.body, /proxy-secret|Proxy map/);
+});
+
+test("временная сетевая ошибка: ограниченные повторы с паузой, затем успех", async () => {
+  upsertTracks([ytTrack("flaky000001")]);
+  const r = await app.inject({ url: "/api/stream/yt:flaky000001", headers: { ...auth, range: "bytes=0-9" } });
+  assert.equal(r.statusCode, 206);
+  assert.equal(resolveCalls("flaky000001"), 3, "две неудачи + успешная попытка");
+});
+
+test("постоянная сетевая ошибка: не больше 3 попыток, понятный код, без бесконечных повторов", async () => {
+  const r = await app.inject({ url: "/api/stream/yt:netdown0001", headers: auth });
+  assert.equal(r.statusCode, 503);
+  assert.equal(r.json().code, "ytdlp_network");
+  assert.equal(resolveCalls("netdown0001"), 3);
+  // Сразу повторный запрос (обновление страницы) — ответ из кэша неудач, без нового процесса
+  await app.inject({ url: "/api/stream/yt:netdown0001", headers: auth });
+  assert.equal(resolveCalls("netdown0001"), 3);
+});
+
+test("постоянная ошибка (видео удалено) не повторяется", async () => {
+  ytdlpTesting.reset();
+  const before = resolveCalls("removed0001");
+  const r = await app.inject({ url: "/api/stream/yt:removed0001", headers: auth });
+  assert.equal(r.json().code, "ytdlp_unavailable");
+  assert.equal(resolveCalls("removed0001") - before, 1);
+});
+
+test("медиасервер отвечает 403 и на свежую ссылку: код ytdlp_forbidden, неудача запомнена", async () => {
+  upsertTracks([ytTrack("forbid00001")]);
+  const r = await app.inject({ url: "/api/stream/yt:forbid00001", headers: { ...auth, range: "bytes=0-" } });
+  assert.equal(r.statusCode, 502);
+  assert.equal(r.json().code, "ytdlp_forbidden");
+  assert.match(r.json().message, /403/);
+  assert.equal(resolveCalls("forbid00001"), 2, "одна свежая ссылка после 403 — и всё");
+  // Перемотка и обновление страницы не запускают yt-dlp снова
+  for (const range of ["bytes=1000-", "bytes=50000-"]) {
+    const again = await app.inject({ url: "/api/stream/yt:forbid00001", headers: { ...auth, range } });
+    assert.equal(again.json().code, "ytdlp_forbidden");
+  }
+  assert.equal(resolveCalls("forbid00001"), 2);
+  const st = (await app.inject({ url: "/api/sources/status", headers: auth })).json().ytdlp;
+  assert.equal(st.lastStreamError.code, "ytdlp_forbidden");
+});
+
+test("медиасервер недоступен по сети: временная ошибка ytdlp_network, не «видео удалено»", async () => {
+  upsertTracks([ytTrack("deadHost001")]);
+  ytdlpTesting.allowMediaUrl((u) => u.protocol === "http:" && u.hostname === "127.0.0.1");
+  const r = await app.inject({ url: "/api/stream/yt:deadHost001", headers: auth });
+  assert.equal(r.statusCode, 503);
+  assert.equal(r.json().code, "ytdlp_network");
+});
+
+test("одновременные запросы одного трека запускают один процесс yt-dlp", async () => {
+  upsertTracks([ytTrack("parallel001")]);
+  const rs = await Promise.all(
+    Array.from({ length: 5 }, (_, i) => app.inject({ url: "/api/stream/yt:parallel001", headers: { ...auth, range: `bytes=${i * 10}-${i * 10 + 9}` } })),
+  );
+  assert.ok(rs.every((r) => r.statusCode === 206));
+  assert.equal(resolveCalls("parallel001"), 1);
+});
+
+test("разбор stderr: 403, сеть, тайм-аут сокета", () => {
+  assert.equal(classifyYtDlpError("ERROR: unable to download video data: HTTP Error 403: Forbidden"), "forbidden");
+  assert.equal(classifyYtDlpError("ERROR: [youtube] x: Unable to download webpage: <urlopen error timed out>"), "network");
+  assert.equal(classifyYtDlpError("ERROR: Unable to download API page: HTTP Error 503: Service Unavailable"), "network");
+  assert.equal(classifyYtDlpError("ERROR: Sign in to confirm you’re not a bot. Unable to download webpage"), "bot_check");
+});
+
+test("оригинал не подменяется ремиксом, кавером или утечкой", () => {
+  assert.equal(variantMarks("Скам"), "");
+  assert.equal(variantMarks("Scam (Leaked)"), "leak");
+  assert.equal(variantMarks("Скам (ремикс)"), "ремикс");
+  const target = { title: "Скам", artist: "Scally Milano", duration: 154 };
+  const mk = (id: string, title: string, source: Track["source"], duration = 154): Track => ({ ...ytTrack("x"), id, source, title, artist: "Scally Milano", duration });
+  assert.ok(scoreCandidate(target, mk("au:a", "Скам", "audius")) > 0);
+  assert.equal(scoreCandidate(target, mk("au:b", "Скам (Remix)", "audius")), 0);
+  assert.equal(scoreCandidate(target, mk("au:c", "Скам (Leaked)", "audius")), 0);
+  assert.equal(scoreCandidate(target, mk("au:d", "Скам (Cover)", "audius")), 0);
+});
+
+test("поиск: та же запись из разрешённого источника заменяет ролик YouTube, ремикс — нет", () => {
+  const mk = (id: string, title: string, source: Track["source"], duration = 154): Track => ({ ...ytTrack("x"), id, source, title, artist: "Scally Milano", duration });
+  const yt = mk("yt:5Fu5ZzqUpNg", "Скам", "ytdlp", 154);
+  const au = mk("au:same", "Скам", "audius", 152);
+  const remix = mk("au:remix", "Скам (Remix)", "audius", 160);
+  assert.deepEqual(preferLicensed([yt, au]).map((t) => t.id), ["au:same"]);
+  assert.deepEqual(preferLicensed([yt, remix]).map((t) => t.id), ["yt:5Fu5ZzqUpNg", "au:remix"]);
+});
+
+test("альтернатива для YouTube ищется без YouTube и проверяется реальным потоком", async () => {
+  const target: Track = { ...ytTrack("forbid00001"), title: "Test Song", artist: "Test Artist", duration: 70 };
+  const ytP = Object.assign(async () => [{ ...ytTrack("okSong00001"), title: "Test Song", artist: "Test Artist" }], { source: "ytdlp" as const });
+  const auP = Object.assign(
+    async () => [
+      { ...ytTrack("x"), id: "au:dead", source: "audius" as const, title: "Test Song", artist: "Test Artist", duration: 70 },
+      { ...ytTrack("x"), id: "au:live", source: "audius" as const, title: "Test Song", artist: "Test Artist", duration: 71 },
+    ],
+    { source: "audius" as const },
+  );
+  const r = await findFullVersion(target, {
+    providers: [ytP, auP],
+    excludeSources: ["ytdlp"],
+    streamUrlOf: async (t) => (t.id === "au:live" ? `${mediaBase}/audio.wav` : `${mediaBase}/expired`),
+    probe: async (url) => (await fetch(url, { headers: { range: "bytes=0-9" } })).status === 206,
+    library: () => [],
+  });
+  assert.equal(r.track?.id, "au:live", "недоступный кандидат отклонён, YouTube не предлагается");
+  assert.ok(r.checked.every((c) => c.source !== "ytdlp"));
 });
