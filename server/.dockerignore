@@ -7,3 +7,5 @@ test
 !.env.example
 *.db
 *.db-*
+*cookies*.txt
+cookies.json

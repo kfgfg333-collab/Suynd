@@ -20,13 +20,16 @@ FROM ${NODE_IMAGE}
 WORKDIR /app
 # yt-dlp ставится из PyPI в отдельное окружение. Набор [default] включает yt-dlp-ejs —
 # без него YouTube отдаёт ссылки, на которые медиасервер отвечает 403.
-# Версию можно закрепить: --build-arg YT_DLP_VERSION=2026.10.21 (пусто — последняя на момент сборки).
-ARG YT_DLP_VERSION=""
+# Версия закреплена, чтобы сборка была воспроизводимой (проверена с YouTube-извлечением и yt-dlp-ejs 0.8.0).
+# YouTube меняется часто: чтобы обновиться, соберите с --build-arg YT_DLP_VERSION=<новая версия>
+# или пустым значением (тогда будет последняя на момент сборки) и прогоните `GET /api/sources/status`.
+ARG YT_DLP_VERSION=2026.10.21
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
   && python3 -m venv /opt/yt-dlp \
   && /opt/yt-dlp/bin/pip install --no-cache-dir "yt-dlp[default]${YT_DLP_VERSION:+==$YT_DLP_VERSION}" \
+  && /opt/yt-dlp/bin/python -c "import yt_dlp_ejs" \
   && /opt/yt-dlp/bin/yt-dlp --version
 ENV NODE_ENV=production \
     DATA_DIR=/data \
