@@ -47,6 +47,20 @@ function MainActions({ track, ctx, onPlaylists }: { track: Track; ctx: { playlis
   const progress = useLibrary((s) => s.downloading.get(track.id));
   const lib = useLibrary.getState();
   const player = usePlayer.getState();
+  // YouTube: скачать можно только ролик под Creative Commons — сервер проверяет лицензию при открытии меню
+  const [license, setLicense] = useState<{ downloadable: boolean; reason?: string } | null>(null);
+  useEffect(() => {
+    setLicense(null);
+    if (track.source !== "ytdlp" || track.downloadable) return;
+    let alive = true;
+    api<{ downloadable: boolean; reason?: string }>(`/api/tracks/${enc(track.id)}/download-check`)
+      .then((r) => alive && setLicense(r))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [track.id, track.source, track.downloadable]);
+  const dl = license?.downloadable ? { ...track, downloadable: true } : track;
 
   const run = (fn: () => void) => () => {
     haptic.impact("light");
@@ -89,15 +103,18 @@ function MainActions({ track, ctx, onPlaylists }: { track: Track; ctx: { playlis
       <SheetItem icon={<ListEnd />} label="Добавить в очередь" onClick={run(() => player.addToQueue(track))} />
       <SheetItem icon={<ListPlus />} label="Добавить в плейлист" onClick={onPlaylists} />
       <SheetItem icon={<Sparkles />} label="Похожее" onClick={run(playSimilar)} />
-      {track.downloadable && (
+      {dl.downloadable && (
         <>
           <SheetItem
             icon={offline ? <Check className="text-full" /> : <Download />}
             label={offline ? "Удалить из скачанного" : progress !== undefined ? `Скачивается… ${Math.round(progress * 100)}%` : "Скачать для офлайна"}
-            onClick={run(() => (offline ? lib.removeDownload(track.id).then(() => toast("Удалено из скачанного")) : lib.download(track)))}
+            onClick={run(() => (offline ? lib.removeDownload(track.id).then(() => toast("Удалено из скачанного")) : lib.download(dl)))}
           />
-          <SheetItem icon={<Send />} label="Отправить файл в чат" onClick={run(() => lib.sendToChat(track))} />
+          <SheetItem icon={<Send />} label="Отправить файл в чат" onClick={run(() => lib.sendToChat(dl))} />
         </>
+      )}
+      {track.source === "ytdlp" && license && !license.downloadable && license.reason && (
+        <div className="px-5 py-2 text-xs text-muted">{license.reason}</div>
       )}
       {track.artistId && <SheetItem icon={<Mic2 />} label="К артисту" onClick={run(() => go(`/artist/${enc(track.artistId!)}`))} />}
       {track.albumId && <SheetItem icon={<Disc3 />} label="К альбому" onClick={run(() => go(`/album/${enc(track.albumId!)}`))} />}

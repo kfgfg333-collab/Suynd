@@ -83,12 +83,29 @@ let lastTime = 0;
 let counted = false;
 let errorStreak = 0;
 let loadToken = 0;
+let retriedId: string | null = null;
+
+/** Почему сервер не отдал поток (удалено, регион, нет yt-dlp…): <audio> сам этого не сообщает */
+async function streamProblem(track: Track): Promise<string | null> {
+  try {
+    const res = await fetch(streamUrl(track), { headers: { range: "bytes=0-1" } });
+    if (res.ok) {
+      await res.body?.cancel();
+      return null;
+    }
+    const data = await res.json().catch(() => ({}));
+    return typeof data.message === "string" ? data.message : null;
+  } catch {
+    return "нет соединения с сервером";
+  }
+}
 
 async function loadTrack(track: Track, autoplay: boolean) {
   const token = ++loadToken;
   listened = 0;
   lastTime = 0;
   counted = false;
+  retriedId = null;
   if (blobUrl) {
     URL.revokeObjectURL(blobUrl);
     blobUrl = null;
@@ -173,14 +190,29 @@ audio.addEventListener("ended", () => {
 audio.addEventListener("error", () => {
   if (!audio.src) return;
   const track = usePlayer.getState().current();
-  errorStreak++;
   usePlayer.setState({ buffering: false, isPlaying: false });
-  if (errorStreak >= 3) {
-    toast("Не получается воспроизвести треки. Проверьте интернет.", "error");
+  if (!track) return;
+  // Прямая ссылка источника могла истечь посреди трека: сервер возьмёт свежую — один раз продолжаем с того же места
+  if (!blobUrl && retriedId !== track.id && lastTime > 1) {
+    retriedId = track.id;
+    const at = lastTime;
+    const token = loadToken;
+    audio.src = `${streamUrl(track)}&retry=${Date.now()}`;
+    audio.addEventListener("loadedmetadata", () => token === loadToken && (audio.currentTime = at), { once: true });
+    audio.play().catch(() => {});
     return;
   }
-  toast(track ? `«${track.title}» недоступен — включаю следующий` : "Трек недоступен", "error");
-  setTimeout(() => usePlayer.getState().next(), 900);
+  errorStreak++;
+  const token = loadToken;
+  void streamProblem(track).then((reason) => {
+    if (token !== loadToken) return;
+    if (errorStreak >= 3) {
+      toast(reason ? `Не получается воспроизвести: ${reason}` : "Не получается воспроизвести треки. Проверьте интернет.", "error");
+      return;
+    }
+    toast(`«${track.title}»: ${reason ?? "трек недоступен"} — включаю следующий`, "error");
+    setTimeout(() => token === loadToken && usePlayer.getState().next(), 900);
+  });
 });
 
 function updateMediaSession(track: Track) {
@@ -486,7 +518,7 @@ export const usePlayer = create<PlayerState>((set, get) => ({
         toast(
           r.checked.length
             ? `${FULL_UNAVAILABLE}: похожие записи нашлись, но ни одна не прошла проверку аудио`
-            : `${FULL_UNAVAILABLE} в подключённых источниках (Audius, Jamendo, Internet Archive, ваши файлы)`,
+            : `${FULL_UNAVAILABLE} в подключённых источниках (Audius, Jamendo, Internet Archive, Openverse, YouTube, ваши файлы)`,
           "error",
         );
         return;

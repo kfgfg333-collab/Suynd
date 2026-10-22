@@ -10,6 +10,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public status: number,
+    /** Причина от сервера, например ytdlp_not_installed */
+    public code?: string,
   ) {
     super(message);
   }
@@ -76,7 +78,7 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
     return api<T>(path, { ...opts, retry: false });
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(data.message ?? `Ошибка ${res.status}`, res.status);
+  if (!res.ok) throw new ApiError(data.message ?? `Ошибка ${res.status}`, res.status, data.code);
   return data as T;
 }
 

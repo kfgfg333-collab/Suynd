@@ -99,7 +99,7 @@ export default function SearchPage() {
             ))}
           </div>
         ) : (
-          <EmptyState icon={<SearchIcon className="h-7 w-7" />} title="Найдите любимую музыку" text="Только полные треки: Audius, Internet Archive, Jamendo и ваши файлы. Совпадения из каталога Deezer проверяем — нет ли где-то полной версии." />
+          <EmptyState icon={<SearchIcon className="h-7 w-7" />} title="Найдите любимую музыку" text="Только полные треки: Audius, Internet Archive, Openverse, Jamendo, YouTube (если на сервере есть yt-dlp) и ваши файлы. Совпадения из каталога Deezer проверяем — нет ли где-то полной версии." />
         )
       ) : (
         <AnimatePresence mode="wait">
@@ -113,18 +113,41 @@ export default function SearchPage() {
 }
 
 function Results({ q, tab }: { q: string; tab: Tab }) {
-  const { data, error, loading, reload } = useApi<{ items: (Track | Artist | Album)[]; unavailable?: { id: string; title: string; artist: string; explicit: boolean }[] }>(
+  const { data, error, loading, reload } = useApi<{
+    items: (Track | Artist | Album)[];
+    unavailable?: { id: string; title: string; artist: string; explicit: boolean }[];
+    warnings?: string[];
+  }>(
     `/api/search?q=${enc(q)}&type=${tab}`,
   );
   if (error) return <ErrorState message={error} onRetry={reload} />;
   if (loading || !data) return tab === "tracks" ? <TrackListSkeleton rows={8} /> : <GridSkeleton round={tab === "artists"} />;
   const unavailable = tab === "tracks" ? (data.unavailable ?? []) : [];
+  // Источник не ответил (например, на сервере нет yt-dlp) — остальные результаты показываем, причину пишем строкой
+  const warnings = (data.warnings ?? []).length > 0 && (
+    <div className="mx-4 mb-3 flex items-start justify-between gap-3 rounded-2xl bg-surface px-4 py-3 text-xs text-muted">
+      <div className="space-y-1">
+        {data.warnings!.map((w) => (
+          <div key={w}>{w}</div>
+        ))}
+      </div>
+      <button onClick={reload} className="shrink-0 font-bold text-white/80">
+        Повторить
+      </button>
+    </div>
+  );
   if (!data.items.length && !unavailable.length)
-    return <EmptyState icon={<SearchX className="h-7 w-7" />} title="Ничего не нашлось" text={`По запросу «${q}» пусто. Попробуйте написать иначе.`} />;
+    return (
+      <>
+        {warnings}
+        <EmptyState icon={<SearchX className="h-7 w-7" />} title="Ничего не нашлось" text={`По запросу «${q}» пусто. Попробуйте написать иначе.`} />
+      </>
+    );
 
   if (tab === "tracks") {
     return (
       <>
+        {warnings}
         {data.items.length > 0 ? (
           <TrackList tracks={data.items as Track[]} title={`Поиск: ${q}`} />
         ) : (

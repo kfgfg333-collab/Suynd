@@ -35,3 +35,16 @@ test("загрузчик: файл короче ожидаемого — не п
   assert.equal(isFullLengthAudio(200, NaN), false);
   assert.equal(isFullLengthAudio(200, 199.5), true);
 });
+
+test("YouTube через yt-dlp: полный ролик играет, короткий и превью Deezer — нет", () => {
+  const t = (id: string, source: Track["source"], duration: number, full: boolean): Track => ({ ...base, id, source, title: "S", artist: "A", duration, full });
+  const yt = t("yt:okSong00001", "ytdlp", 200, true);
+  const ytShort = t("yt:short000001", "ytdlp", 30, true);
+  const dz = t("dz:5", "deezer", 30, false);
+  assert.equal(isFullTrack(yt), true);
+  assert.equal(isFullTrack(ytShort), false);
+  const plan = planPlayback([dz, yt, ytShort], 1)!;
+  assert.deepEqual(plan.queue.map((x) => x.id), ["yt:okSong00001"]);
+  assert.equal(plan.index, 0);
+  assert.equal(planPlayback([dz, yt], 0), null, "нажатие на превью не запускает плеер");
+});
